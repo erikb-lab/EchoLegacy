@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
+#import "ELFeatures.h"
 #import "ELTrack.h"
 
 @class ELStreamInfo;
@@ -69,6 +70,22 @@ typedef enum {
     NSTimer *_sleepTimer;
     NSDate *_sleepFireDate;
     NSInteger _sleepTimerRemainingSeconds;
+
+#if EL_FEATURE_SMART_PLAYBACK
+    BOOL _pauseOnMuteEnabled;
+    BOOL _resumeOnHeadphonesEnabled;
+    BOOL _pausedByHeadphoneUnplug;
+#endif
+
+#if EL_FEATURE_OFFLINE_CROSSFADE
+    BOOL _offlineCrossfadeEnabled;
+    BOOL _crossfadeActive;
+    AVAudioPlayer *_crossfadePlayer;
+    NSTimer *_crossfadeTimer;
+    NSInteger _crossfadeNextIndex;
+    CFAbsoluteTime _crossfadeStartTime;
+    double _crossfadeDuration;
+#endif
 }
 
 + (ELAudioEngine *)sharedEngine;
@@ -86,6 +103,13 @@ typedef enum {
 @property (nonatomic, readonly) ELRepeatMode repeatMode;
 @property (nonatomic, assign) BOOL shakeToShuffleEnabled;
 @property (nonatomic, readonly) NSInteger sleepTimerRemainingSeconds;
+#if EL_FEATURE_SMART_PLAYBACK
+@property (nonatomic, assign) BOOL pauseOnMuteEnabled;
+@property (nonatomic, assign) BOOL resumeOnHeadphonesEnabled;
+#endif
+#if EL_FEATURE_OFFLINE_CROSSFADE
+@property (nonatomic, assign) BOOL offlineCrossfadeEnabled;
+#endif
 
 - (void)playTracks:(NSArray *)tracks startingAtIndex:(NSInteger)index;
 - (void)playTracksShuffled:(NSArray *)tracks;

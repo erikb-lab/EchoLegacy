@@ -2,7 +2,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import "ELFeatures.h"
 
-#define EL_NP_HAS_MORE_MENU (EL_FEATURE_RADIO_MIX || EL_FEATURE_SLEEP_TIMER || EL_FEATURE_DOWNLOADS || EL_FEATURE_DOCK_MODE || EL_FEATURE_LOCAL_PLAYLISTS)
+#define EL_NP_HAS_MORE_MENU (EL_FEATURE_RADIO_MIX || EL_FEATURE_SLEEP_TIMER || EL_FEATURE_DOWNLOADS || EL_FEATURE_DOCK_MODE || EL_FEATURE_LOCAL_PLAYLISTS || EL_FEATURE_MUSIC_DNA)
 
 @interface ELNowPlayingVC : UIViewController
 #if EL_FEATURE_LYRICS || EL_NP_HAS_MORE_MENU
@@ -20,8 +20,6 @@
 #endif
 {
     UIImageView *_backdropView;
-    UIImageView *_topScrimView;
-    UIImageView *_artFadeView;
     UIImageView *_artView;
     UILabel *_sourceBadge;
 #if EL_FEATURE_LYRICS
@@ -50,6 +48,11 @@
     NSInteger _moreDownloadIdx;
 #if EL_FEATURE_DOCK_MODE
     NSInteger _moreDockIdx;
+    UIButton *_dockBtn;
+#endif
+#if EL_FEATURE_MUSIC_DNA
+    NSInteger _moreDNAIdx;
+    UIButton *_dnaBtn;
 #endif
 #if EL_FEATURE_LOCAL_PLAYLISTS
     NSInteger _morePlaylistIdx;

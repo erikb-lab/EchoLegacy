@@ -54,6 +54,7 @@
 + (UIImage *)stretchablePillImageWithHeight:(CGFloat)height color:(UIColor *)color;
 + (UIImage *)stretchableCardImageWithColor:(UIColor *)color;
 + (UIImage *)roundedRectImageWithSize:(CGSize)size radius:(CGFloat)radius fillColor:(UIColor *)fillColor borderColor:(UIColor *)borderColor;
++ (UIImage *)artShadowFrameImageWithSize:(CGFloat)size radius:(CGFloat)radius;
 + (UIImage *)verticalGradientImageWithHeight:(CGFloat)h
                                     topColor:(UIColor *)top
                                     midColor:(UIColor *)mid

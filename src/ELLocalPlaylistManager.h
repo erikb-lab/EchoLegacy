@@ -32,6 +32,7 @@ extern NSString *const ELLocalPlaylistsChangedNotification;
 - (NSArray *)playlists;
 - (ELLocalPlaylist *)playlistWithId:(NSString *)playlistId;
 - (ELLocalPlaylist *)createPlaylistNamed:(NSString *)name;
+- (ELLocalPlaylist *)upsertPlaylistWithId:(NSString *)playlistId name:(NSString *)name tracks:(NSArray *)tracks;
 - (void)renamePlaylistId:(NSString *)playlistId toName:(NSString *)newName;
 - (void)deletePlaylistId:(NSString *)playlistId;
 - (BOOL)addTrack:(ELTrack *)track toPlaylistId:(NSString *)playlistId;

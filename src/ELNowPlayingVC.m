@@ -13,6 +13,9 @@
 #if EL_FEATURE_LYRICS
 #import "ELLyricsClient.h"
 #endif
+#if EL_FEATURE_MUSIC_DNA
+#import "ELMusicDNAVC.h"
+#endif
 #import "ELQueueVC.h"
 #import "ELTheme.h"
 #if EL_FEATURE_LIKES || EL_FEATURE_RADIO_MIX
@@ -145,83 +148,64 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
 
 - (void)applyBackdropColor:(UIColor *)dominant animated:(BOOL)animated {
     (void)animated;
-    if (!_backdropView || !_artFadeView) return;
+    if (!_backdropView) return;
     if (!dominant) dominant = [ELTheme dominantBackdropColorFromImage:nil];
-    UIColor *darker = [ELTheme darkerShadeOfColor:dominant factor:0.54f];
-    UIColor *clearDom = [ELTheme colorWithColor:dominant alpha:0.0f];
-    UIColor *midDom = [ELTheme colorWithColor:dominant alpha:0.62f];
+    UIColor *topCol = [ELTheme darkerShadeOfColor:dominant factor:0.78f];
+    UIColor *midCol = [ELTheme darkerShadeOfColor:dominant factor:0.52f];
+    UIColor *botCol = [ELTheme darkerShadeOfColor:dominant factor:0.24f];
 
-    self.view.backgroundColor = dominant;
+    self.view.backgroundColor = botCol;
     _backdropView.image = [ELTheme verticalGradientImageWithHeight:460.0f
-                                                          topColor:dominant
-                                                          midColor:dominant
-                                                       midLocation:0.58f
-                                                       bottomColor:darker
+                                                          topColor:topCol
+                                                          midColor:midCol
+                                                       midLocation:0.52f
+                                                       bottomColor:botCol
                                                             opaque:YES];
-    _artFadeView.image = [ELTheme verticalGradientImageWithHeight:120.0f
-                                                         topColor:clearDom
-                                                         midColor:midDom
-                                                      midLocation:0.56f
-                                                      bottomColor:dominant
-                                                           opaque:NO];
+}
+
+- (UIButton *)newUtilityPillWithTitle:(NSString *)title icon:(UIImage *)icon action:(SEL)action {
+    UIButton *btn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
+    UIColor *bg = [UIColor colorWithWhite:1.0f alpha:0.14f];
+    UIColor *bgHi = [UIColor colorWithWhite:1.0f alpha:0.26f];
+    [btn setBackgroundImage:[ELTheme stretchablePillImageWithHeight:26.0f color:bg] forState:UIControlStateNormal];
+    [btn setBackgroundImage:[ELTheme stretchablePillImageWithHeight:26.0f color:bgHi] forState:UIControlStateHighlighted];
+    if (icon) [btn setImage:icon forState:UIControlStateNormal];
+    if (title) [btn setTitle:title forState:UIControlStateNormal];
+    [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    btn.titleLabel.font = [UIFont boldSystemFontOfSize:10.0f];
+    [btn addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:btn];
+    return btn;
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
 
-    UIColor *pillDark = [UIColor colorWithWhite:0.0f alpha:0.40f];
-    UIColor *pillDarkHi = [UIColor colorWithWhite:0.0f alpha:0.62f];
-    UIColor *pillLight = [UIColor colorWithWhite:1.0f alpha:0.18f];
-    UIColor *pillLightHi = [UIColor colorWithWhite:1.0f alpha:0.30f];
-    UIColor *secondaryWhite = [UIColor colorWithWhite:1.0f alpha:0.74f];
+    UIColor *pillDark = [UIColor colorWithWhite:0.0f alpha:0.32f];
+    UIColor *pillDarkHi = [UIColor colorWithWhite:0.0f alpha:0.52f];
+    UIColor *pillLight = [UIColor colorWithWhite:1.0f alpha:0.16f];
+    UIColor *pillLightHi = [UIColor colorWithWhite:1.0f alpha:0.28f];
+    UIColor *secondaryWhite = [UIColor colorWithWhite:1.0f alpha:0.78f];
 
-    /* Dynamic dominant-color full-screen vertical gradient backdrop (1xH strip) */
+    /* Rich full-screen 1x460 dominant-color vertical gradient backdrop */
     _backdropView = [[UIImageView alloc] initWithFrame:CGRectMake(0.0f, 0.0f, 320.0f, 460.0f)];
     _backdropView.contentMode = UIViewContentModeScaleToFill;
     _backdropView.opaque = YES;
     _backdropView.userInteractionEnabled = NO;
     [self.view addSubview:_backdropView];
-
-    /* Full-bleed album art at top (zero dynamic shadowOpacity / zero offscreen cornerRadius FBO) */
-    _artView = [[UIImageView alloc] initWithFrame:CGRectMake(0.0f, 0.0f, 320.0f, 268.0f)];
-    _artView.contentMode = UIViewContentModeScaleAspectFill;
-    _artView.clipsToBounds = YES;
-    _artView.opaque = YES;
-    _artView.backgroundColor = [ELTheme surfaceColor];
-    _artView.image = [ELTheme placeholderArtImage];
-    [self.view addSubview:_artView];
-
-    /* Subtle top scrim so translucent circular top pills stay readable over bright covers */
-    _topScrimView = [[UIImageView alloc] initWithFrame:CGRectMake(0.0f, 0.0f, 320.0f, 60.0f)];
-    _topScrimView.contentMode = UIViewContentModeScaleToFill;
-    _topScrimView.userInteractionEnabled = NO;
-    _topScrimView.image = [ELTheme verticalGradientImageWithHeight:60.0f
-                                                          topColor:[UIColor colorWithWhite:0.0f alpha:0.46f]
-                                                          midColor:nil
-                                                       midLocation:0.0f
-                                                       bottomColor:[UIColor colorWithWhite:0.0f alpha:0.0f]
-                                                            opaque:NO];
-    [_artView addSubview:_topScrimView];
-
-    /* Smooth bottom art fade seamlessly melting into dominant backdrop */
-    _artFadeView = [[UIImageView alloc] initWithFrame:CGRectMake(0.0f, 148.0f, 320.0f, 120.0f)];
-    _artFadeView.contentMode = UIViewContentModeScaleToFill;
-    _artFadeView.userInteractionEnabled = NO;
-    [_artView addSubview:_artFadeView];
-
     [self applyBackdropColor:[ELTheme dominantBackdropColorFromImage:nil] animated:NO];
 
-    /* Top bar translucent circular pills */
+    /* Top bar (y=8..42): subtle Close, centered slim Source pill, clean Queue */
     UIImage *topCircleBg = [ELTheme circlePillImageWithSize:34.0f color:pillDark];
     UIImage *topCircleHi = [ELTheme circlePillImageWithSize:34.0f color:pillDarkHi];
 
-    [[self newCirclePillButtonWithFrame:CGRectMake(12.0f, 10.0f, 34.0f, 34.0f)
+    [[self newCirclePillButtonWithFrame:CGRectMake(14.0f, 8.0f, 34.0f, 34.0f)
                                      bg:topCircleBg
                                    bgHi:topCircleHi
-                                   icon:[ELTheme iconCloseSize:20.0f color:[UIColor whiteColor]]
+                                   icon:[ELTheme iconCloseSize:18.0f color:[UIColor whiteColor]]
                                  action:@selector(onClose)] autorelease];
 
-    UIImageView *sourcePillBg = [[[UIImageView alloc] initWithFrame:CGRectMake(52.0f, 16.0f, 102.0f, 22.0f)] autorelease];
+    UIImageView *sourcePillBg = [[[UIImageView alloc] initWithFrame:CGRectMake(104.0f, 14.0f, 112.0f, 22.0f)] autorelease];
     sourcePillBg.image = [ELTheme stretchablePillImageWithHeight:22.0f color:pillDark];
     [self.view addSubview:sourcePillBg];
 
@@ -231,21 +215,31 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
                                           align:UITextAlignmentCenter
                                          parent:self.view];
 
-#if EL_FEATURE_LYRICS
-    _lyricsBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-    _lyricsBtn.frame = CGRectMake(160.0f, 13.0f, 68.0f, 28.0f);
-    [_lyricsBtn setBackgroundImage:[ELTheme stretchablePillImageWithHeight:28.0f color:pillDark] forState:UIControlStateNormal];
-    [_lyricsBtn setBackgroundImage:[ELTheme stretchablePillImageWithHeight:28.0f color:pillDarkHi] forState:UIControlStateHighlighted];
-    [_lyricsBtn setImage:[ELTheme iconLyricsSize:14.0f color:[UIColor whiteColor]] forState:UIControlStateNormal];
-    [_lyricsBtn setTitle:@" Lyrics" forState:UIControlStateNormal];
-    [_lyricsBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    _lyricsBtn.titleLabel.font = [UIFont boldSystemFontOfSize:11.0f];
-    [_lyricsBtn addTarget:self action:@selector(onLyricsTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:_lyricsBtn];
+    _queueBtn = [self newCirclePillButtonWithFrame:CGRectMake(272.0f, 8.0f, 34.0f, 34.0f)
+                                                bg:topCircleBg
+                                              bgHi:topCircleHi
+                                              icon:[ELTheme iconQueueSize:18.0f color:[UIColor whiteColor]]
+                                            action:@selector(onQueueTapped)];
 
-    /* Dark-translucent synced lyrics overlay (toggled over album art) */
-    _lyricsContainer = [[UIView alloc] initWithFrame:CGRectMake(0.0f, 52.0f, 320.0f, 212.0f)];
-    _lyricsContainer.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.54f];
+    /* Centered 212x212 Square Album Art over pre-rendered soft shadow frame (zero offscreen FBO) */
+    CGRect artFrame = CGRectMake(54.0f, 46.0f, 212.0f, 212.0f);
+    UIImageView *artShadow = [[[UIImageView alloc] initWithFrame:CGRectInset(artFrame, -12.0f, -12.0f)] autorelease];
+    artShadow.image = [ELTheme artShadowFrameImageWithSize:212.0f radius:12.0f];
+    artShadow.userInteractionEnabled = NO;
+    [self.view addSubview:artShadow];
+
+    _artView = [[UIImageView alloc] initWithFrame:artFrame];
+    _artView.contentMode = UIViewContentModeScaleAspectFill;
+    _artView.clipsToBounds = YES;
+    _artView.opaque = YES;
+    _artView.backgroundColor = [ELTheme surfaceColor];
+    _artView.image = [ELTheme placeholderArtImage];
+    [self.view addSubview:_artView];
+
+#if EL_FEATURE_LYRICS
+    /* Dark-translucent synced lyrics overlay aligned over the album art area */
+    _lyricsContainer = [[UIView alloc] initWithFrame:CGRectMake(16.0f, 46.0f, 288.0f, 216.0f)];
+    _lyricsContainer.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.72f];
     _lyricsContainer.hidden = YES;
     [self.view addSubview:_lyricsContainer];
 
@@ -259,7 +253,7 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     _lyricsTable.delegate = self;
     [_lyricsContainer addSubview:_lyricsTable];
 
-    _lyricsStatusLabel = [self newClearLabelWithFrame:CGRectMake(20.0f, 76.0f, 280.0f, 60.0f)
+    _lyricsStatusLabel = [self newClearLabelWithFrame:CGRectMake(16.0f, 76.0f, 256.0f, 60.0f)
                                                  font:[UIFont systemFontOfSize:14.0f]
                                                 color:secondaryWhite
                                                 align:UITextAlignmentCenter
@@ -272,34 +266,18 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     _lastDisplayedElapsedSec = -1;
     _lastDisplayedDurationSec = -1;
 
-    CGFloat queueX = EL_FEATURE_DOWNLOADS ? 234.0f : 274.0f;
-    _queueBtn = [self newCirclePillButtonWithFrame:CGRectMake(queueX, 10.0f, 34.0f, 34.0f)
-                                                bg:topCircleBg
-                                              bgHi:topCircleHi
-                                              icon:[ELTheme iconQueueSize:18.0f color:[UIColor whiteColor]]
-                                            action:@selector(onQueueTapped)];
-
-#if EL_FEATURE_DOWNLOADS
-    _downloadBtn = [self newCirclePillButtonWithFrame:CGRectMake(274.0f, 10.0f, 34.0f, 34.0f)
-                                                   bg:topCircleBg
-                                                 bgHi:topCircleHi
-                                                 icon:nil
-                                               action:@selector(onDownloadTapped)];
-    _downloadBtn.titleLabel.font = [UIFont boldSystemFontOfSize:10.0f];
-#endif
-
-    /* Left-aligned bold track title & artist (with marquee scroll on overflow) + right-side (•••) Actions & Heart pills */
-    UIFont *titleFont = [UIFont boldSystemFontOfSize:18.0f];
+    /* Track Title + Artist row (y=272..318) + Heart & More pills */
+    UIFont *titleFont = [UIFont boldSystemFontOfSize:19.0f];
     UIFont *artistFont = [UIFont systemFontOfSize:14.0f];
 #if EL_FEATURE_MARQUEE
-    [self setupMarqueeRowWithFrame:CGRectMake(20.0f, 268.0f, 198.0f, 24.0f)
+    [self setupMarqueeRowWithFrame:CGRectMake(20.0f, 272.0f, 216.0f, 24.0f)
                               font:titleFont
                              color:[UIColor whiteColor]
                       containerOut:&_titleMarqueeContainer
                           trackOut:&_titleTrackView
                           labelOut:&_titleLabel
                           cloneOut:&_titleLabelClone];
-    [self setupMarqueeRowWithFrame:CGRectMake(20.0f, 294.0f, 198.0f, 19.0f)
+    [self setupMarqueeRowWithFrame:CGRectMake(20.0f, 297.0f, 216.0f, 19.0f)
                               font:artistFont
                              color:secondaryWhite
                       containerOut:&_artistMarqueeContainer
@@ -307,13 +285,13 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
                           labelOut:&_artistLabel
                           cloneOut:&_artistLabelClone];
 #else
-    _titleLabel = [self newClearLabelWithFrame:CGRectMake(20.0f, 268.0f, 198.0f, 24.0f)
+    _titleLabel = [self newClearLabelWithFrame:CGRectMake(20.0f, 272.0f, 216.0f, 24.0f)
                                           font:titleFont
                                          color:[UIColor whiteColor]
                                          align:UITextAlignmentLeft
                                         parent:self.view];
     _titleLabel.lineBreakMode = UILineBreakModeTailTruncation;
-    _artistLabel = [self newClearLabelWithFrame:CGRectMake(20.0f, 294.0f, 198.0f, 19.0f)
+    _artistLabel = [self newClearLabelWithFrame:CGRectMake(20.0f, 297.0f, 216.0f, 19.0f)
                                            font:artistFont
                                           color:secondaryWhite
                                           align:UITextAlignmentLeft
@@ -321,24 +299,24 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     _artistLabel.lineBreakMode = UILineBreakModeTailTruncation;
 #endif
 
-#if EL_NP_HAS_MORE_MENU
-    _moreBtn = [self newCirclePillButtonWithFrame:CGRectMake(224.0f, 273.0f, 36.0f, 36.0f)
-                                               bg:[ELTheme circlePillImageWithSize:36.0f color:pillLight]
-                                             bgHi:[ELTheme circlePillImageWithSize:36.0f color:pillLightHi]
-                                             icon:[ELTheme iconMoreSize:18.0f color:[UIColor whiteColor]]
-                                           action:@selector(onMoreTapped)];
-#endif
-
 #if EL_FEATURE_LIKES
-    _likeBtn = [self newCirclePillButtonWithFrame:CGRectMake(266.0f, 272.0f, 38.0f, 38.0f)
+    _likeBtn = [self newCirclePillButtonWithFrame:CGRectMake(240.0f, 276.0f, 34.0f, 34.0f)
                                                bg:nil
                                              bgHi:nil
                                              icon:nil
                                            action:@selector(onLikeTapped)];
 #endif
 
-    /* Sleek rounded scrubber */
-    _scrubber = [[UISlider alloc] initWithFrame:CGRectMake(20.0f, 326.0f, 280.0f, 26.0f)];
+#if EL_NP_HAS_MORE_MENU
+    _moreBtn = [self newCirclePillButtonWithFrame:CGRectMake(276.0f, 276.0f, 34.0f, 34.0f)
+                                               bg:[ELTheme circlePillImageWithSize:34.0f color:pillLight]
+                                             bgHi:[ELTheme circlePillImageWithSize:34.0f color:pillLightHi]
+                                             icon:[ELTheme iconMoreSize:17.0f color:[UIColor whiteColor]]
+                                           action:@selector(onMoreTapped)];
+#endif
+
+    /* Sleek rounded scrubber + tabular elapsed/duration (y=324..362) */
+    _scrubber = [[UISlider alloc] initWithFrame:CGRectMake(20.0f, 324.0f, 280.0f, 24.0f)];
     _scrubber.minimumValue = 0.0f;
     _scrubber.maximumValue = 1.0f;
     [_scrubber setMinimumTrackImage:[ELTheme sliderTrackImageWithColor:[UIColor whiteColor]] forState:UIControlStateNormal];
@@ -349,64 +327,63 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     [_scrubber addTarget:self action:@selector(onScrubEnd) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
     [self.view addSubview:_scrubber];
 
-    _elapsedLabel = [[UILabel alloc] initWithFrame:CGRectMake(20.0f, 354.0f, 72.0f, 15.0f)];
-    _elapsedLabel.backgroundColor = [UIColor clearColor];
-    _elapsedLabel.font = [UIFont systemFontOfSize:11.0f];
-    _elapsedLabel.textColor = secondaryWhite;
+    _elapsedLabel = [self newClearLabelWithFrame:CGRectMake(20.0f, 348.0f, 72.0f, 15.0f)
+                                            font:[UIFont systemFontOfSize:11.0f]
+                                           color:secondaryWhite
+                                           align:UITextAlignmentLeft
+                                          parent:self.view];
     _elapsedLabel.text = @"0:00";
-    [self.view addSubview:_elapsedLabel];
 
-    _durationLabel = [[UILabel alloc] initWithFrame:CGRectMake(228.0f, 354.0f, 72.0f, 15.0f)];
-    _durationLabel.backgroundColor = [UIColor clearColor];
-    _durationLabel.font = [UIFont systemFontOfSize:11.0f];
-    _durationLabel.textColor = secondaryWhite;
-    _durationLabel.textAlignment = UITextAlignmentRight;
+    _durationLabel = [self newClearLabelWithFrame:CGRectMake(228.0f, 348.0f, 72.0f, 15.0f)
+                                             font:[UIFont systemFontOfSize:11.0f]
+                                            color:secondaryWhite
+                                            align:UITextAlignmentRight
+                                           parent:self.view];
     _durationLabel.text = @"0:00";
-    [self.view addSubview:_durationLabel];
 
-    /* Transport row: Shuffle | Prev | Play/Pause | Next | Repeat */
-    UIImage *dotImg = [ELTheme circlePillImageWithSize:4.0f color:[UIColor whiteColor]];
+    /* Iconic Transport row (y=366..424): solid-white 56x56 Play/Pause with dark icon */
+    UIImage *dotImg = [ELTheme circlePillImageWithSize:4.0f color:[ELTheme accentColor]];
 
     _shuffleBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-    _shuffleBtn.frame = CGRectMake(14.0f, 392.0f, 40.0f, 44.0f);
+    _shuffleBtn.frame = CGRectMake(18.0f, 376.0f, 40.0f, 42.0f);
     [_shuffleBtn addTarget:self action:@selector(onShuffle) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:_shuffleBtn];
 
-    _shuffleDot = [[UIImageView alloc] initWithFrame:CGRectMake(18.0f, 37.0f, 4.0f, 4.0f)];
+    _shuffleDot = [[UIImageView alloc] initWithFrame:CGRectMake(18.0f, 36.0f, 4.0f, 4.0f)];
     _shuffleDot.image = dotImg;
     _shuffleDot.hidden = YES;
     [_shuffleBtn addSubview:_shuffleDot];
 
     _prevBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-    _prevBtn.frame = CGRectMake(64.0f, 389.0f, 48.0f, 50.0f);
-    [_prevBtn setImage:[ELTheme iconPrevSize:30.0f color:[UIColor whiteColor]] forState:UIControlStateNormal];
+    _prevBtn.frame = CGRectMake(68.0f, 372.0f, 48.0f, 48.0f);
+    [_prevBtn setImage:[ELTheme iconPrevSize:28.0f color:[UIColor whiteColor]] forState:UIControlStateNormal];
     [_prevBtn addTarget:self action:@selector(onPrev) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:_prevBtn];
 
     _playPauseBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-    _playPauseBtn.frame = CGRectMake(128.0f, 382.0f, 64.0f, 64.0f);
-    [_playPauseBtn setBackgroundImage:[ELTheme circlePillImageWithSize:64.0f color:pillLight] forState:UIControlStateNormal];
-    [_playPauseBtn setBackgroundImage:[ELTheme circlePillImageWithSize:64.0f color:pillLightHi] forState:UIControlStateHighlighted];
+    _playPauseBtn.frame = CGRectMake(132.0f, 368.0f, 56.0f, 56.0f);
+    [_playPauseBtn setBackgroundImage:[ELTheme circlePillImageWithSize:56.0f color:[UIColor whiteColor]] forState:UIControlStateNormal];
+    [_playPauseBtn setBackgroundImage:[ELTheme circlePillImageWithSize:56.0f color:[UIColor colorWithWhite:0.84f alpha:1.0f]] forState:UIControlStateHighlighted];
     [_playPauseBtn addTarget:self action:@selector(onPlayPause) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:_playPauseBtn];
 
-    _spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleWhite];
+    _spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleGray];
     _spinner.center = _playPauseBtn.center;
     _spinner.hidesWhenStopped = YES;
     [self.view addSubview:_spinner];
 
     _nextBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-    _nextBtn.frame = CGRectMake(208.0f, 389.0f, 48.0f, 50.0f);
-    [_nextBtn setImage:[ELTheme iconNextSize:30.0f color:[UIColor whiteColor]] forState:UIControlStateNormal];
+    _nextBtn.frame = CGRectMake(204.0f, 372.0f, 48.0f, 48.0f);
+    [_nextBtn setImage:[ELTheme iconNextSize:28.0f color:[UIColor whiteColor]] forState:UIControlStateNormal];
     [_nextBtn addTarget:self action:@selector(onNext) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:_nextBtn];
 
     _repeatBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-    _repeatBtn.frame = CGRectMake(266.0f, 392.0f, 40.0f, 44.0f);
+    _repeatBtn.frame = CGRectMake(262.0f, 376.0f, 40.0f, 42.0f);
     [_repeatBtn addTarget:self action:@selector(onRepeat) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:_repeatBtn];
 
-    _repeatDot = [[UIImageView alloc] initWithFrame:CGRectMake(18.0f, 37.0f, 4.0f, 4.0f)];
+    _repeatDot = [[UIImageView alloc] initWithFrame:CGRectMake(18.0f, 36.0f, 4.0f, 4.0f)];
     _repeatDot.image = dotImg;
     _repeatDot.hidden = YES;
     [_repeatBtn addSubview:_repeatDot];
@@ -417,14 +394,51 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     repBadgeBg.hidden = YES;
     [_repeatBtn addSubview:repBadgeBg];
 
-    _repeatOneBadge = [[UILabel alloc] initWithFrame:repBadgeBg.frame];
-    _repeatOneBadge.backgroundColor = [UIColor clearColor];
-    _repeatOneBadge.font = [UIFont boldSystemFontOfSize:9.0f];
-    _repeatOneBadge.textColor = [UIColor whiteColor];
-    _repeatOneBadge.textAlignment = UITextAlignmentCenter;
+    _repeatOneBadge = [self newClearLabelWithFrame:repBadgeBg.frame
+                                              font:[UIFont boldSystemFontOfSize:9.0f]
+                                             color:[UIColor whiteColor]
+                                             align:UITextAlignmentCenter
+                                            parent:_repeatBtn];
     _repeatOneBadge.text = @"1";
     _repeatOneBadge.hidden = YES;
-    [_repeatBtn addSubview:_repeatOneBadge];
+
+    /* Clean Bottom Utility Row (y=430..456): Lyrics | Download | Dock | DNA */
+    NSMutableArray *utilBtns = [NSMutableArray arrayWithCapacity:4];
+#if EL_FEATURE_LYRICS
+    _lyricsBtn = [self newUtilityPillWithTitle:@" Lyrics"
+                                          icon:[ELTheme iconLyricsSize:12.0f color:[UIColor whiteColor]]
+                                        action:@selector(onLyricsTapped)];
+    [utilBtns addObject:_lyricsBtn];
+#endif
+#if EL_FEATURE_DOWNLOADS
+    _downloadBtn = [self newUtilityPillWithTitle:nil
+                                            icon:nil
+                                          action:@selector(onDownloadTapped)];
+    [utilBtns addObject:_downloadBtn];
+#endif
+#if EL_FEATURE_DOCK_MODE
+    _dockBtn = [self newUtilityPillWithTitle:@"Dock"
+                                        icon:nil
+                                      action:@selector(onDockTapped)];
+    [utilBtns addObject:_dockBtn];
+#endif
+#if EL_FEATURE_MUSIC_DNA
+    _dnaBtn = [self newUtilityPillWithTitle:@"DNA"
+                                       icon:nil
+                                     action:@selector(onMusicDNATapped)];
+    [utilBtns addObject:_dnaBtn];
+#endif
+    NSUInteger uCount = [utilBtns count];
+    if (uCount > 0) {
+        CGFloat gap = 8.0f;
+        CGFloat totalW = 288.0f;
+        CGFloat btnW = floorf((totalW - gap * (CGFloat)(uCount - 1)) / (CGFloat)uCount);
+        CGFloat startX = floorf((320.0f - (btnW * (CGFloat)uCount + gap * (CGFloat)(uCount - 1))) * 0.5f);
+        for (NSUInteger i = 0; i < uCount; i++) {
+            UIButton *b = [utilBtns objectAtIndex:i];
+            b.frame = CGRectMake(startX + (CGFloat)i * (btnW + gap), 430.0f, btnW, 26.0f);
+        }
+    }
 
 #if EL_FEATURE_LIKES
     _lastLikeVisualState = -1;
@@ -466,8 +480,6 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     [_lastArtistText release]; _lastArtistText = nil;
 #endif
     [_backdropView release]; _backdropView = nil;
-    [_topScrimView release]; _topScrimView = nil;
-    [_artFadeView release]; _artFadeView = nil;
     [_artView release]; _artView = nil;
     [_sourceBadge release]; _sourceBadge = nil;
 #if EL_FEATURE_LYRICS
@@ -498,6 +510,12 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     [_queueBtn release]; _queueBtn = nil;
 #if EL_FEATURE_DOWNLOADS
     [_downloadBtn release]; _downloadBtn = nil;
+#endif
+#if EL_FEATURE_DOCK_MODE
+    [_dockBtn release]; _dockBtn = nil;
+#endif
+#if EL_FEATURE_MUSIC_DNA
+    [_dnaBtn release]; _dnaBtn = nil;
 #endif
     [_spinner release]; _spinner = nil;
     [_loadedArtKey release]; _loadedArtKey = nil;
@@ -537,6 +555,22 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     [self presentModalViewController:qvc animated:YES];
 }
 
+#if EL_FEATURE_DOCK_MODE
+- (void)onDockTapped {
+    ELDockModeVC *dvc = [[[ELDockModeVC alloc] init] autorelease];
+    [self presentModalViewController:dvc animated:YES];
+}
+#endif
+
+#if EL_FEATURE_MUSIC_DNA
+- (void)onMusicDNATapped {
+    ELTrack *track = [[ELAudioEngine sharedEngine] currentTrack];
+    if (!track) return;
+    ELMusicDNAVC *mvc = [[[ELMusicDNAVC alloc] initWithTrack:track] autorelease];
+    [self presentModalViewController:mvc animated:YES];
+}
+#endif
+
 - (void)onScrubStart   { _isScrubbing = YES; }
 - (void)onScrubChanged {
     double dur = [[ELAudioEngine sharedEngine] duration];
@@ -568,13 +602,13 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
         unlikedBgHi = [[UIColor colorWithWhite:1.0f alpha:0.28f] retain];
     }
     if (_isLiked) {
-        [_likeBtn setBackgroundImage:[ELTheme circlePillImageWithSize:38.0f color:likedBg] forState:UIControlStateNormal];
-        [_likeBtn setBackgroundImage:[ELTheme circlePillImageWithSize:38.0f color:likedBgHi] forState:UIControlStateHighlighted];
-        [_likeBtn setImage:[ELTheme iconHeartFilledSize:20.0f color:[ELTheme accentColor]] forState:UIControlStateNormal];
+        [_likeBtn setBackgroundImage:[ELTheme circlePillImageWithSize:34.0f color:likedBg] forState:UIControlStateNormal];
+        [_likeBtn setBackgroundImage:[ELTheme circlePillImageWithSize:34.0f color:likedBgHi] forState:UIControlStateHighlighted];
+        [_likeBtn setImage:[ELTheme iconHeartFilledSize:18.0f color:[ELTheme accentColor]] forState:UIControlStateNormal];
     } else {
-        [_likeBtn setBackgroundImage:[ELTheme circlePillImageWithSize:38.0f color:unlikedBg] forState:UIControlStateNormal];
-        [_likeBtn setBackgroundImage:[ELTheme circlePillImageWithSize:38.0f color:unlikedBgHi] forState:UIControlStateHighlighted];
-        [_likeBtn setImage:[ELTheme iconHeartOutlineSize:20.0f color:[UIColor whiteColor]] forState:UIControlStateNormal];
+        [_likeBtn setBackgroundImage:[ELTheme circlePillImageWithSize:34.0f color:unlikedBg] forState:UIControlStateNormal];
+        [_likeBtn setBackgroundImage:[ELTheme circlePillImageWithSize:34.0f color:unlikedBgHi] forState:UIControlStateHighlighted];
+        [_likeBtn setImage:[ELTheme iconHeartOutlineSize:18.0f color:[UIColor whiteColor]] forState:UIControlStateNormal];
     }
 }
 
@@ -974,9 +1008,10 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
         NSInteger iconState = (eng.state == ELPlayerStatePlaying) ? 1 : 0;
         if (_lastPlayIconState != iconState) {
             _lastPlayIconState = iconState;
+            UIColor *darkIcon = [UIColor colorWithWhite:0.08f alpha:1.0f];
             UIImage *icon = (iconState == 1)
-                ? [ELTheme iconPauseSize:34.0f color:[UIColor whiteColor]]
-                : [ELTheme iconPlaySize:34.0f color:[UIColor whiteColor]];
+                ? [ELTheme iconPauseSize:28.0f color:darkIcon]
+                : [ELTheme iconPlaySize:28.0f color:darkIcon];
             [_playPauseBtn setImage:icon forState:UIControlStateNormal];
         }
     }
@@ -1087,10 +1122,10 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
 #pragma mark - Synced Lyrics
 
 - (void)updateLyricsButtonVisual {
-    UIColor *bg = _showingLyrics ? [ELTheme accentColor] : [UIColor colorWithWhite:0.0f alpha:0.40f];
-    UIColor *bgHi = _showingLyrics ? [ELTheme darkerShadeOfColor:[ELTheme accentColor] factor:0.78f] : [UIColor colorWithWhite:0.0f alpha:0.62f];
-    [_lyricsBtn setBackgroundImage:[ELTheme stretchablePillImageWithHeight:28.0f color:bg] forState:UIControlStateNormal];
-    [_lyricsBtn setBackgroundImage:[ELTheme stretchablePillImageWithHeight:28.0f color:bgHi] forState:UIControlStateHighlighted];
+    UIColor *bg = _showingLyrics ? [ELTheme accentColor] : [UIColor colorWithWhite:1.0f alpha:0.14f];
+    UIColor *bgHi = _showingLyrics ? [ELTheme darkerShadeOfColor:[ELTheme accentColor] factor:0.78f] : [UIColor colorWithWhite:1.0f alpha:0.26f];
+    [_lyricsBtn setBackgroundImage:[ELTheme stretchablePillImageWithHeight:26.0f color:bg] forState:UIControlStateNormal];
+    [_lyricsBtn setBackgroundImage:[ELTheme stretchablePillImageWithHeight:26.0f color:bgHi] forState:UIControlStateHighlighted];
 }
 
 - (void)onLyricsTapped {
@@ -1302,6 +1337,9 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
 #if EL_FEATURE_DOCK_MODE
     _moreDockIdx = -1;
 #endif
+#if EL_FEATURE_MUSIC_DNA
+    _moreDNAIdx = -1;
+#endif
 #if EL_FEATURE_LOCAL_PLAYLISTS
     _morePlaylistIdx = -1;
 #endif
@@ -1314,6 +1352,9 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
 #endif
 #if EL_FEATURE_DOCK_MODE
     _moreDockIdx = [sheet addButtonWithTitle:@"Dock Mode"];
+#endif
+#if EL_FEATURE_MUSIC_DNA
+    _moreDNAIdx = [sheet addButtonWithTitle:@"Music DNA"];
 #endif
 #if EL_FEATURE_SLEEP_TIMER
     NSInteger rem = [[ELAudioEngine sharedEngine] sleepTimerRemainingSeconds];
@@ -1388,8 +1429,13 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
 #endif
 #if EL_FEATURE_DOCK_MODE
         if (buttonIndex == _moreDockIdx) {
-            ELDockModeVC *dvc = [[[ELDockModeVC alloc] init] autorelease];
-            [self presentModalViewController:dvc animated:YES];
+            [self onDockTapped];
+            return;
+        }
+#endif
+#if EL_FEATURE_MUSIC_DNA
+        if (buttonIndex == _moreDNAIdx) {
+            [self onMusicDNATapped];
             return;
         }
 #endif

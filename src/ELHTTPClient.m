@@ -566,7 +566,9 @@ static ELHostCategory el_category_for_host(NSString *host) {
         [host isEqualToString:@"www.youtube.com"] ||
         [host isEqualToString:@"youtube.com"] ||
         [host isEqualToString:@"m.youtube.com"] ||
-        [host isEqualToString:@"youtubei.googleapis.com"]) {
+        [host isEqualToString:@"youtubei.googleapis.com"] ||
+        [host isEqualToString:@"suggestqueries-clients6.youtube.com"] ||
+        [host isEqualToString:@"suggestqueries.google.com"]) {
         return ELHostCategoryYouTubeAPI;
     }
 
@@ -606,6 +608,11 @@ static ELHostCategory el_category_for_host(NSString *host) {
     /* 6. LRCLIB Lyrics */
     if ([host isEqualToString:@"lrclib.net"]) {
         return ELHostCategoryLyrics;
+    }
+
+    /* 7. Wikipedia Music DNA */
+    if ([host isEqualToString:@"en.wikipedia.org"]) {
+        return ELHostCategoryInfo;
     }
 
     return (ELHostCategory)-1;

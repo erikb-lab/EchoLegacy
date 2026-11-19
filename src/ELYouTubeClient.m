@@ -767,12 +767,61 @@ static BOOL el_write_binary_plist(id obj, NSString *path) {
                             error:outError];
 }
 
-- (NSArray *)searchSongs:(NSString *)query error:(NSString **)outError {
+static NSString *el_yt_url_encode(NSString *s) {
+    if ([s length] == 0) return @"";
+    CFStringRef encoded = CFURLCreateStringByAddingPercentEscapes(
+        kCFAllocatorDefault,
+        (CFStringRef)s,
+        NULL,
+        CFSTR("!*'();:@&=+$,/?%#[]"),
+        kCFStringEncodingUTF8);
+    if (!encoded) return @"";
+    return [(NSString *)encoded autorelease];
+}
+
+- (NSArray *)fetchSearchSuggestionsForQuery:(NSString *)query {
     if ([query length] == 0) return [NSArray array];
+    NSString *trimmed = [query stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if ([trimmed length] == 0) return [NSArray array];
+    if ([trimmed length] > 120) trimmed = [trimmed substringToIndex:120];
+
+    NSString *url = [NSString stringWithFormat:
+                     @"https://suggestqueries-clients6.youtube.com/complete/search?client=firefox&ds=yt&q=%@",
+                     el_yt_url_encode(trimmed)];
+    if (!ELValidateHTTPSURL(url, ELHostCategoryYouTubeAPI, NULL, NULL, NULL)) return [NSArray array];
+
+    NSDictionary *headers = [NSDictionary dictionaryWithObjectsAndKeys:
+                             kWebUserAgent, @"User-Agent",
+                             @"application/json", @"Accept",
+                             nil];
+    ELHTTPResponse *resp = [[ELHTTPClient sharedClient] getURL:url headers:headers maxBytes:(32U * 1024U)];
+    if (!resp || resp.statusCode != 200 || [resp.body length] == 0) return [NSArray array];
+
+    id json = [ELJSON objectWithData:resp.body];
+    if (![json isKindOfClass:[NSArray class]] || [(NSArray *)json count] < 2) return [NSArray array];
+    id rawList = [(NSArray *)json objectAtIndex:1];
+    if (![rawList isKindOfClass:[NSArray class]]) return [NSArray array];
+
+    NSMutableArray *out = [NSMutableArray arrayWithCapacity:8];
+    for (id item in (NSArray *)rawList) {
+        if ([out count] >= 8) break;
+        if ([item isKindOfClass:[NSString class]] && [(NSString *)item length] > 0) {
+            [out addObject:item];
+        }
+    }
+    return out;
+}
+
+- (NSArray *)searchTracksForQuery:(NSString *)query
+                        songsOnly:(BOOL)songsOnly
+                       hideShorts:(BOOL)hideShorts
+                            error:(NSString **)outError {
+    if ([query length] == 0) return [NSArray array];
+    NSString *params = songsOnly ? @"EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D" : @"EgWKAQIIAWoMEAMQBBAJEAoQBRAV";
     NSDictionary *body = [NSDictionary dictionaryWithObjectsAndKeys:
                           [self webRemixContext], @"context",
                           query, @"query",
-                          @"EgWKAQIIAWoMEAMQBBAJEAoQBRAV", @"params",
+                          params, @"params",
                           nil];
     NSDictionary *json = [self postYTMusicEndpoint:@"search" body:body authenticated:NO error:outError];
     if (!json) return nil;
@@ -780,7 +829,20 @@ static BOOL el_write_binary_plist(id obj, NSString *path) {
     NSMutableArray *tracks = [NSMutableArray array];
     NSMutableSet *seen = [NSMutableSet set];
     el_collect_tracks_recursive(json, tracks, seen, 0);
+
+    if (hideShorts && [tracks count] > 0) {
+        NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:[tracks count]];
+        for (ELTrack *t in tracks) {
+            if (t.durationSeconds > 0 && t.durationSeconds < 45) continue;
+            [filtered addObject:t];
+        }
+        return filtered;
+    }
     return tracks;
+}
+
+- (NSArray *)searchSongs:(NSString *)query error:(NSString **)outError {
+    return [self searchTracksForQuery:query songsOnly:NO hideShorts:NO error:outError];
 }
 
 - (NSArray *)fetchHomeTracksForMood:(NSString *)mood error:(NSString **)outError {

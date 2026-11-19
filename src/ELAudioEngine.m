@@ -6,6 +6,12 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <unistd.h>
+#if EL_FEATURE_OFFLINE_CROSSFADE
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <sys/socket.h>
+#include <string.h>
+#endif
 
 NSString *const ELPlayerStateChangedNotification = @"ELPlayerStateChangedNotification";
 NSString *const ELPlayerProgressNotification = @"ELPlayerProgressNotification";
@@ -292,12 +298,54 @@ static void el_audio_route_change_cb(void *inClientData,
     if (reasonNum) {
         SInt32 reason = 0;
         CFNumberGetValue(reasonNum, kCFNumberSInt32Type, &reason);
+        ELAudioEngine *eng = (ELAudioEngine *)inClientData;
         if (reason == kAudioSessionRouteChangeReason_OldDeviceUnavailable) {
-            ELAudioEngine *eng = (ELAudioEngine *)inClientData;
+#if EL_FEATURE_SMART_PLAYBACK
+            [eng performSelectorOnMainThread:@selector(handleHeadphoneUnplug) withObject:nil waitUntilDone:NO];
+#else
             [eng performSelectorOnMainThread:@selector(pause) withObject:nil waitUntilDone:NO];
+#endif
         }
+#if EL_FEATURE_SMART_PLAYBACK
+        else if (reason == kAudioSessionRouteChangeReason_NewDeviceAvailable) {
+            [eng performSelectorOnMainThread:@selector(handleHeadphoneReconnect) withObject:nil waitUntilDone:NO];
+        }
+#endif
     }
 }
+
+#if EL_FEATURE_SMART_PLAYBACK
+static void el_audio_volume_change_cb(void *inClientData,
+                                      AudioSessionPropertyID inID,
+                                      UInt32 inDataSize,
+                                      const void *inData) {
+    if (inID != kAudioSessionProperty_CurrentHardwareOutputVolume || !inData || inDataSize < sizeof(Float32)) return;
+    Float32 vol = *(const Float32 *)inData;
+    if (vol <= 0.001f) {
+        ELAudioEngine *eng = (ELAudioEngine *)inClientData;
+        [eng performSelectorOnMainThread:@selector(handleVolumeMuted) withObject:nil waitUntilDone:NO];
+    }
+}
+#endif
+
+#if EL_FEATURE_OFFLINE_CROSSFADE
+static BOOL el_is_wifi_connected(void) {
+    struct ifaddrs *addrs = NULL;
+    if (getifaddrs(&addrs) != 0 || !addrs) return NO;
+    BOOL connected = NO;
+    for (struct ifaddrs *cur = addrs; cur != NULL; cur = cur->ifa_next) {
+        if (!cur->ifa_name || !cur->ifa_addr) continue;
+        if (strcmp(cur->ifa_name, "en0") == 0 &&
+            cur->ifa_addr->sa_family == AF_INET &&
+            (cur->ifa_flags & (IFF_UP | IFF_RUNNING)) == (IFF_UP | IFF_RUNNING)) {
+            connected = YES;
+            break;
+        }
+    }
+    freeifaddrs(addrs);
+    return connected;
+}
+#endif
 
 typedef struct {
     ELAudioEngine *engine;
@@ -428,10 +476,28 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
         } else {
             _shakeToShuffleEnabled = [ud boolForKey:@"ELShakeToShuffle"];
         }
+#if EL_FEATURE_SMART_PLAYBACK
+        if ([ud objectForKey:@"ELPauseOnMute"] == nil) {
+            _pauseOnMuteEnabled = YES;
+        } else {
+            _pauseOnMuteEnabled = [ud boolForKey:@"ELPauseOnMute"];
+        }
+        _resumeOnHeadphonesEnabled = [ud boolForKey:@"ELResumeOnHeadphones"];
+#endif
+#if EL_FEATURE_OFFLINE_CROSSFADE
+        if ([ud objectForKey:@"ELOfflineCrossfade"] == nil) {
+            _offlineCrossfadeEnabled = YES;
+        } else {
+            _offlineCrossfadeEnabled = [ud boolForKey:@"ELOfflineCrossfade"];
+        }
+#endif
 
         /* CoreAudio C AudioSession + AVAudioSession (both required on iOS 4.1 for AudioQueue background/lock playback) */
         AudioSessionInitialize(NULL, NULL, el_audio_interruption_cb, self);
         AudioSessionAddPropertyListener(kAudioSessionProperty_AudioRouteChange, el_audio_route_change_cb, self);
+#if EL_FEATURE_SMART_PLAYBACK
+        AudioSessionAddPropertyListener(kAudioSessionProperty_CurrentHardwareOutputVolume, el_audio_volume_change_cb, self);
+#endif
         [self activateAudioSession];
 
         NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
@@ -758,6 +824,146 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
     [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:@"ELShakeToShuffle"];
 }
 
+#if EL_FEATURE_SMART_PLAYBACK
+- (BOOL)pauseOnMuteEnabled { return _pauseOnMuteEnabled; }
+- (void)setPauseOnMuteEnabled:(BOOL)enabled {
+    _pauseOnMuteEnabled = enabled;
+    [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:@"ELPauseOnMute"];
+}
+
+- (BOOL)resumeOnHeadphonesEnabled { return _resumeOnHeadphonesEnabled; }
+- (void)setResumeOnHeadphonesEnabled:(BOOL)enabled {
+    _resumeOnHeadphonesEnabled = enabled;
+    [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:@"ELResumeOnHeadphones"];
+}
+
+- (void)handleHeadphoneUnplug {
+    if (_state == ELPlayerStatePlaying) {
+        _pausedByHeadphoneUnplug = YES;
+        [self pause];
+    }
+}
+
+- (void)handleHeadphoneReconnect {
+    if (_resumeOnHeadphonesEnabled && _pausedByHeadphoneUnplug && _state == ELPlayerStatePaused) {
+        _pausedByHeadphoneUnplug = NO;
+        [self resume];
+    }
+}
+
+- (void)handleVolumeMuted {
+    if (_pauseOnMuteEnabled && _state == ELPlayerStatePlaying) {
+        [self pause];
+    }
+}
+#endif
+
+#if EL_FEATURE_OFFLINE_CROSSFADE
+- (BOOL)offlineCrossfadeEnabled { return _offlineCrossfadeEnabled; }
+- (void)setOfflineCrossfadeEnabled:(BOOL)enabled {
+    _offlineCrossfadeEnabled = enabled;
+    [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:@"ELOfflineCrossfade"];
+    if (!enabled) [self cancelCrossfade];
+}
+
+- (void)cancelCrossfade {
+    if (_crossfadeTimer) {
+        [_crossfadeTimer invalidate];
+        [_crossfadeTimer release];
+        _crossfadeTimer = nil;
+    }
+    if (_crossfadePlayer) {
+        _crossfadePlayer.delegate = nil;
+        [_crossfadePlayer stop];
+        [_crossfadePlayer release];
+        _crossfadePlayer = nil;
+    }
+    if (_offlinePlayer) {
+        _offlinePlayer.volume = 1.0f;
+    }
+    _crossfadeActive = NO;
+}
+
+- (void)maybeStartOfflineCrossfadeWithCurrentTime:(double)cur duration:(double)dur {
+    if (!_offlineCrossfadeEnabled || _crossfadeActive || !_playingOffline || !_offlinePlayer) return;
+    if (_state != ELPlayerStatePlaying || _repeatMode == ELRepeatModeOne) return;
+    double rem = dur - cur;
+    if (dur <= 6.0 || rem > 3.0 || rem < 0.25) return;
+    if (el_is_wifi_connected()) return;
+
+    NSInteger count = (NSInteger)[_queue count];
+    if (count == 0) return;
+    NSInteger nextIdx = -1;
+    if (_currentIndex + 1 < count) {
+        nextIdx = _currentIndex + 1;
+    } else if (_repeatMode == ELRepeatModeAll) {
+        nextIdx = 0;
+    }
+    if (nextIdx < 0 || nextIdx == _currentIndex) return;
+
+    ELTrack *nextTrack = [_queue objectAtIndex:(NSUInteger)nextIdx];
+    ELDownloadManager *dm = [ELDownloadManager sharedManager];
+    if (![dm isDownloaded:nextTrack.videoId]) return;
+    NSString *nextPath = [dm localAudioPathForVideoId:nextTrack.videoId];
+    if (!nextPath || access([nextPath fileSystemRepresentation], R_OK) != 0) return;
+
+    NSError *err = nil;
+    AVAudioPlayer *nextPlayer = [[AVAudioPlayer alloc] initWithContentsOfURL:[NSURL fileURLWithPath:nextPath] error:&err];
+    if (!nextPlayer) return;
+    nextPlayer.volume = 0.0f;
+    [nextPlayer prepareToPlay];
+    if (![nextPlayer play]) {
+        [nextPlayer release];
+        return;
+    }
+
+    _crossfadePlayer = nextPlayer;
+    _crossfadeActive = YES;
+    _crossfadeNextIndex = nextIdx;
+    _crossfadeStartTime = CFAbsoluteTimeGetCurrent();
+    _crossfadeDuration = (rem < 1.0) ? 1.0 : ((rem > 3.0) ? 3.0 : rem);
+    _crossfadeTimer = [[NSTimer scheduledTimerWithTimeInterval:0.05
+                                                        target:self
+                                                      selector:@selector(onCrossfadeTick:)
+                                                      userInfo:nil
+                                                       repeats:YES] retain];
+}
+
+- (void)onCrossfadeTick:(NSTimer *)timer {
+    (void)timer;
+    if (!_crossfadeActive || !_crossfadePlayer || !_offlinePlayer) {
+        [self cancelCrossfade];
+        return;
+    }
+    double elapsed = CFAbsoluteTimeGetCurrent() - _crossfadeStartTime;
+    float frac = (_crossfadeDuration > 0.0) ? (float)(elapsed / _crossfadeDuration) : 1.0f;
+    if (frac < 0.0f) frac = 0.0f;
+    if (frac >= 1.0f) {
+        [_crossfadeTimer invalidate];
+        [_crossfadeTimer release];
+        _crossfadeTimer = nil;
+
+        _offlinePlayer.delegate = nil;
+        [_offlinePlayer stop];
+        [_offlinePlayer release];
+
+        _offlinePlayer = _crossfadePlayer;
+        _crossfadePlayer = nil;
+        _offlinePlayer.delegate = self;
+        _offlinePlayer.volume = 1.0f;
+        _crossfadeActive = NO;
+
+        _currentIndex = _crossfadeNextIndex;
+        _sessionToken++;
+        _preNextDoneToken = 0;
+        [self postStateChanged];
+        return;
+    }
+    _offlinePlayer.volume = 1.0f - frac;
+    _crossfadePlayer.volume = frac;
+}
+#endif
+
 - (void)postToast:(NSString *)message {
     if ([message length] == 0) return;
     NSDictionary *ui = [NSDictionary dictionaryWithObject:message forKey:@"message"];
@@ -908,9 +1114,9 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
 }
 
 - (void)onProgressTick {
+    double cur = [self currentTime];
+    double dur = [self duration];
     if (!_isBackgrounded) {
-        double cur = [self currentTime];
-        double dur = [self duration];
         NSDictionary *ui = [NSDictionary dictionaryWithObjectsAndKeys:
                             [NSNumber numberWithDouble:cur], @"currentTime",
                             [NSNumber numberWithDouble:dur], @"duration",
@@ -919,6 +1125,9 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
                                                             object:self
                                                           userInfo:ui];
     }
+#if EL_FEATURE_OFFLINE_CROSSFADE
+    [self maybeStartOfflineCrossfadeWithCurrentTime:cur duration:dur];
+#endif
     [self maybeTriggerPreNextBuffer];
     if (_isBackgrounded && ![self needsBackgroundPreNextTimer]) {
         [self stopProgressTimer];
@@ -938,6 +1147,12 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
 }
 
 - (void)stopInternal:(BOOL)clearError {
+#if EL_FEATURE_OFFLINE_CROSSFADE
+    [self cancelCrossfade];
+#endif
+#if EL_FEATURE_SMART_PLAYBACK
+    _pausedByHeadphoneUnplug = NO;
+#endif
     [self signalStopActiveStream];
 
     if (_offlinePlayer) {
@@ -1580,6 +1795,9 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
 }
 
 - (void)pause {
+#if EL_FEATURE_OFFLINE_CROSSFADE
+    [self cancelCrossfade];
+#endif
     [self stopProgressTimer];
     if (_playingOffline && _offlinePlayer) {
         [_offlinePlayer pause];
@@ -1601,6 +1819,9 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
 }
 
 - (void)resume {
+#if EL_FEATURE_SMART_PLAYBACK
+    _pausedByHeadphoneUnplug = NO;
+#endif
     if (_playingOffline && _offlinePlayer) {
         [_offlinePlayer play];
         _state = ELPlayerStatePlaying;
@@ -1665,6 +1886,9 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
 }
 
 - (void)seekToSeconds:(double)seconds {
+#if EL_FEATURE_OFFLINE_CROSSFADE
+    [self cancelCrossfade];
+#endif
     if (seconds < 0.0) seconds = 0.0;
     if (_playingOffline && _offlinePlayer) {
         if (seconds > _offlinePlayer.duration) seconds = _offlinePlayer.duration;

@@ -100,6 +100,12 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
 #if EL_FEATURE_SHAKE_SHUFFLE
     [_shakeSwitch release]; _shakeSwitch = nil;
 #endif
+#if EL_FEATURE_SMART_PLAYBACK
+    [_pauseOnMuteSwitch release]; _pauseOnMuteSwitch = nil;
+#endif
+#if EL_FEATURE_OFFLINE_CROSSFADE
+    [_crossfadeSwitch release]; _crossfadeSwitch = nil;
+#endif
 #if EL_FEATURE_LYRICS
     [_lyricsSwitch release]; _lyricsSwitch = nil;
 #endif
@@ -265,6 +271,56 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
     py += 8.0f;
 #endif
 
+#if EL_FEATURE_SMART_PLAYBACK
+    UILabel *muteLbl = [[self newLabelWithFrame:CGRectMake(16, py, 165, 18)
+                                           font:[UIFont boldSystemFontOfSize:13.0f]
+                                          color:[ELTheme textPrimaryColor]
+                                          lines:1
+                                         parent:_prefsCard] autorelease];
+    muteLbl.text = @"Smart Playback";
+
+    UILabel *muteSub = [[self newLabelWithFrame:CGRectMake(16, py + 18.0f, 165, 16)
+                                           font:[UIFont systemFontOfSize:10.0f]
+                                          color:[ELTheme textSecondaryColor]
+                                          lines:1
+                                         parent:_prefsCard] autorelease];
+    muteSub.text = @"Pause on mute or unplug";
+
+    _pauseOnMuteSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(184, py + 4.0f, 94, 27)];
+    _pauseOnMuteSwitch.on = [[ELAudioEngine sharedEngine] pauseOnMuteEnabled];
+    [_pauseOnMuteSwitch addTarget:self action:@selector(onPauseOnMuteToggled) forControlEvents:UIControlEventValueChanged];
+    [_prefsCard addSubview:_pauseOnMuteSwitch];
+
+    py += 46.0f;
+    [self addSeparatorAtY:py toView:_prefsCard];
+    py += 8.0f;
+#endif
+
+#if EL_FEATURE_OFFLINE_CROSSFADE
+    UILabel *xfadeLbl = [[self newLabelWithFrame:CGRectMake(16, py, 165, 18)
+                                            font:[UIFont boldSystemFontOfSize:13.0f]
+                                           color:[ELTheme textPrimaryColor]
+                                           lines:1
+                                          parent:_prefsCard] autorelease];
+    xfadeLbl.text = @"Offline Crossfade";
+
+    UILabel *xfadeSub = [[self newLabelWithFrame:CGRectMake(16, py + 18.0f, 165, 16)
+                                            font:[UIFont systemFontOfSize:10.0f]
+                                           color:[ELTheme textSecondaryColor]
+                                           lines:1
+                                          parent:_prefsCard] autorelease];
+    xfadeSub.text = @"3s blend offline (no Wi-Fi)";
+
+    _crossfadeSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(184, py + 4.0f, 94, 27)];
+    _crossfadeSwitch.on = [[ELAudioEngine sharedEngine] offlineCrossfadeEnabled];
+    [_crossfadeSwitch addTarget:self action:@selector(onCrossfadeToggled) forControlEvents:UIControlEventValueChanged];
+    [_prefsCard addSubview:_crossfadeSwitch];
+
+    py += 46.0f;
+    [self addSeparatorAtY:py toView:_prefsCard];
+    py += 8.0f;
+#endif
+
 #if EL_FEATURE_LYRICS
     UILabel *lyricsLbl = [[self newLabelWithFrame:CGRectMake(16, py, 165, 18)
                                              font:[UIFont boldSystemFontOfSize:13.0f]
@@ -385,6 +441,20 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
 - (void)onShakeToggled {
     [[ELAudioEngine sharedEngine] setShakeToShuffleEnabled:_shakeSwitch.on];
     [[ELAudioEngine sharedEngine] postToast:(_shakeSwitch.on ? @"Shake to Shuffle: On" : @"Shake to Shuffle: Off")];
+}
+#endif
+
+#if EL_FEATURE_SMART_PLAYBACK
+- (void)onPauseOnMuteToggled {
+    [[ELAudioEngine sharedEngine] setPauseOnMuteEnabled:_pauseOnMuteSwitch.on];
+    [[ELAudioEngine sharedEngine] postToast:(_pauseOnMuteSwitch.on ? @"Smart Playback: On" : @"Smart Playback: Off")];
+}
+#endif
+
+#if EL_FEATURE_OFFLINE_CROSSFADE
+- (void)onCrossfadeToggled {
+    [[ELAudioEngine sharedEngine] setOfflineCrossfadeEnabled:_crossfadeSwitch.on];
+    [[ELAudioEngine sharedEngine] postToast:(_crossfadeSwitch.on ? @"Offline Crossfade: On" : @"Offline Crossfade: Off")];
 }
 #endif
 
@@ -573,6 +643,12 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
 
 #if EL_FEATURE_SHAKE_SHUFFLE
     _shakeSwitch.on = [[ELAudioEngine sharedEngine] shakeToShuffleEnabled];
+#endif
+#if EL_FEATURE_SMART_PLAYBACK
+    _pauseOnMuteSwitch.on = [[ELAudioEngine sharedEngine] pauseOnMuteEnabled];
+#endif
+#if EL_FEATURE_OFFLINE_CROSSFADE
+    _crossfadeSwitch.on = [[ELAudioEngine sharedEngine] offlineCrossfadeEnabled];
 #endif
 #if EL_FEATURE_LYRICS
     _lyricsSwitch.on = [[NSUserDefaults standardUserDefaults] boolForKey:kOnlineLyricsDefaultsKey];

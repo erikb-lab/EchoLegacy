@@ -27,6 +27,9 @@ typedef enum {
     NSString *_batchTitle;
     NSInteger _batchTotal;
     NSInteger _batchCompleted;
+    NSString *_batchPlaylistId;
+    NSString *_batchPlaylistName;
+    NSArray *_batchPlaylistTracks;
     unsigned long long _totalDownloadedBytes;
     BOOL _isBackgrounded;
     NSString *_downloadsDir;
@@ -58,6 +61,7 @@ typedef enum {
 
 - (void)downloadTrack:(ELTrack *)track;
 - (void)downloadTracks:(NSArray *)tracks;
+- (void)downloadTracks:(NSArray *)tracks forPlaylistId:(NSString *)playlistId playlistName:(NSString *)playlistName;
 - (void)downloadPlaylistTracks:(NSArray *)tracks title:(NSString *)title;
 - (void)cancelBatchDownload;
 - (void)cancelDownloadForVideoId:(NSString *)videoId;

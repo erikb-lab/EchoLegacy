@@ -421,8 +421,19 @@
     if (dm.isBatchDownloading) {
         [dm cancelBatchDownload];
         [[ELAudioEngine sharedEngine] postToast:@"Download cancelled"];
-    } else if ([_tracks count] > 0 && ![self allTracksDownloaded]) {
-        [dm downloadPlaylistTracks:_tracks title:_playlist.title];
+    } else if ([_tracks count] > 0) {
+        NSString *plName = ([_playlist.title length] > 0)
+            ? _playlist.title
+            : ([_playlist.playlistId isEqualToString:@"LM"] ? @"Liked Songs" : @"Playlist");
+        BOOL alreadyDone = [self allTracksDownloaded];
+        [dm downloadTracks:_tracks forPlaylistId:_playlist.playlistId playlistName:plName];
+#if EL_FEATURE_LOCAL_PLAYLISTS
+        if (alreadyDone) {
+            [[ELAudioEngine sharedEngine] postToast:@"Saved to Offline Playlists"];
+        }
+#else
+        (void)alreadyDone;
+#endif
     }
     [self updateDownloadButtonState];
 }

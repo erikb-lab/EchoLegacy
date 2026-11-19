@@ -42,6 +42,12 @@
 #if EL_FEATURE_SHAKE_SHUFFLE
     UISwitch *_shakeSwitch;
 #endif
+#if EL_FEATURE_SMART_PLAYBACK
+    UISwitch *_pauseOnMuteSwitch;
+#endif
+#if EL_FEATURE_OFFLINE_CROSSFADE
+    UISwitch *_crossfadeSwitch;
+#endif
 #if EL_FEATURE_LYRICS
     UISwitch *_lyricsSwitch;
 #endif

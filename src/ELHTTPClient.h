@@ -7,7 +7,8 @@ typedef enum {
     ELHostCategoryMediaStream,  /* *.googlevideo.com */
     ELHostCategoryThumbnail,    /* i.ytimg.com, *.ytimg.com, lh3.googleusercontent.com, *.googleusercontent.com, *.ggpht.com */
     ELHostCategoryGitHubUpdate, /* api.github.com, github.com, objects.githubusercontent.com, release-assets.githubusercontent.com */
-    ELHostCategoryLyrics        /* lrclib.net */
+    ELHostCategoryLyrics,       /* lrclib.net */
+    ELHostCategoryInfo          /* en.wikipedia.org */
 } ELHostCategory;
 
 /* Validates that urlString is a clean https:// URL (no CR/LF/control chars, no userinfo,

@@ -1,8 +1,10 @@
 #import "ELDownloadManager.h"
+#import "ELFeatures.h"
 #import "ELAudioEngine.h"
 #import "ELHTTPClient.h"
 #import "ELYouTubeClient.h"
 #import "ELLyricsClient.h"
+#import "ELLocalPlaylistManager.h"
 #import "el_fmp4_adts.h"
 #include <stdio.h>
 #include <unistd.h>
@@ -172,6 +174,9 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
     [_retryCountById release];
     [_batchIds release];
     [_batchTitle release];
+    [_batchPlaylistId release];
+    [_batchPlaylistName release];
+    [_batchPlaylistTracks release];
     [_downloadsDir release];
     [_ioCond release];
     [_pendingIndexSnapshot release];
@@ -598,7 +603,36 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
     return YES;
 }
 
+- (void)syncBatchOfflinePlaylist {
+#if EL_FEATURE_LOCAL_PLAYLISTS
+    NSString *plId = nil;
+    NSString *plName = nil;
+    NSMutableArray *downloadedOrdered = nil;
+
+    pthread_mutex_lock(&_stateLock);
+    if ([_batchPlaylistId length] > 0 && [_batchPlaylistTracks count] > 0) {
+        plId = [[_batchPlaylistId copy] autorelease];
+        plName = [[_batchPlaylistName copy] autorelease];
+        downloadedOrdered = [NSMutableArray arrayWithCapacity:[_batchPlaylistTracks count]];
+        for (ELTrack *t in _batchPlaylistTracks) {
+            if (t && el_is_valid_video_id(t.videoId) && [_downloadedIds containsObject:t.videoId]) {
+                [downloadedOrdered addObject:t];
+            }
+        }
+    }
+    pthread_mutex_unlock(&_stateLock);
+
+    if ([plId length] > 0 && [downloadedOrdered count] > 0) {
+        NSString *localId = [NSString stringWithFormat:@"dl_%@", plId];
+        [[ELLocalPlaylistManager sharedManager] upsertPlaylistWithId:localId
+                                                                name:plName
+                                                              tracks:downloadedOrdered];
+    }
+#endif
+}
+
 - (void)finishBatchWithSavedCount:(NSInteger)count {
+    [self syncBatchOfflinePlaylist];
     NSString *msg = [NSString stringWithFormat:@"Playlist saved (%ld tracks)", (long)count];
     [self performSelectorOnMainThread:@selector(postBatchToastOnMain:) withObject:msg waitUntilDone:NO];
     pthread_mutex_lock(&_stateLock);
@@ -622,7 +656,26 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
 }
 
 - (void)downloadTracks:(NSArray *)tracks {
+    [self downloadTracks:tracks forPlaylistId:nil playlistName:nil];
+}
+
+- (void)downloadTracks:(NSArray *)tracks forPlaylistId:(NSString *)playlistId playlistName:(NSString *)playlistName {
     if (!tracks || [tracks count] == 0) return;
+    if ([playlistId length] > 0) {
+        pthread_mutex_lock(&_stateLock);
+        [_batchPlaylistId release];
+        _batchPlaylistId = [playlistId copy];
+        [_batchPlaylistName release];
+        _batchPlaylistName = [playlistName copy];
+        [_batchPlaylistTracks release];
+        _batchPlaylistTracks = [tracks copy];
+        pthread_mutex_unlock(&_stateLock);
+
+        [self downloadPlaylistTracks:tracks title:playlistName];
+        [self syncBatchOfflinePlaylist];
+        return;
+    }
+
     BOOL added = NO;
     pthread_mutex_lock(&_stateLock);
     for (ELTrack *track in tracks) {
@@ -845,6 +898,7 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
 
     if (success) {
         [self saveIndex];
+        [self syncBatchOfflinePlaylist];
     } else {
         [fm removeItemAtPath:finalAudio error:nil];
     }

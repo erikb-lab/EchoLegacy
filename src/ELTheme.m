@@ -983,6 +983,33 @@ static UIColor *el_backdrop_color_from_rgb(float r, float g, float b) {
     return el_end_icon(k);
 }
 
++ (UIImage *)artShadowFrameImageWithSize:(CGFloat)size radius:(CGFloat)radius {
+    if (size < 16.0f) size = 16.0f;
+    if (size > 320.0f) size = 320.0f;
+    const CGFloat pad = 12.0f;
+    CGFloat total = size + pad * 2.0f;
+    NSString *k = [NSString stringWithFormat:@"artframe_%d_%d", (int)(size + 0.5f), (int)(radius + 0.5f)];
+    CGContextRef ctx = NULL;
+    UIImage *c = el_begin_icon(k, CGSizeMake(total, total), &ctx);
+    if (c) return c;
+
+    CGRect artRect = CGRectMake(pad, pad, size, size);
+    CGContextSaveGState(ctx);
+    CGContextSetShadowWithColor(ctx, CGSizeMake(0.0f, 5.0f), 9.0f, [[UIColor colorWithWhite:0.0f alpha:0.55f] CGColor]);
+    [[UIColor colorWithWhite:0.06f alpha:1.0f] setFill];
+    el_add_rounded_rect_path(ctx, artRect, radius);
+    CGContextFillPath(ctx);
+    CGContextRestoreGState(ctx);
+
+    /* Subtle 1px inner highlight border for crisp framing on dark backdrops */
+    [[UIColor colorWithWhite:1.0f alpha:0.14f] setStroke];
+    CGContextSetLineWidth(ctx, 1.0f);
+    el_add_rounded_rect_path(ctx, CGRectInset(artRect, 0.5f, 0.5f), radius);
+    CGContextStrokePath(ctx);
+
+    return el_end_icon(k);
+}
+
 + (UIImage *)verticalGradientImageWithHeight:(CGFloat)h
                                     topColor:(UIColor *)top
                                     midColor:(UIColor *)mid
@@ -1063,7 +1090,7 @@ static UIColor *el_backdrop_color_from_rgb(float r, float g, float b) {
     if ([g_icon_cache count] > 0) {
         NSMutableArray *evictKeys = [NSMutableArray array];
         for (NSString *k in g_icon_cache) {
-            if ([k hasPrefix:@"vgrad_"] || [k hasPrefix:@"rrect_"]) {
+            if ([k hasPrefix:@"vgrad_"] || [k hasPrefix:@"rrect_"] || [k hasPrefix:@"artframe_"]) {
                 [evictKeys addObject:k];
             }
         }

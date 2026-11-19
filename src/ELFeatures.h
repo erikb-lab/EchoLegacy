@@ -95,4 +95,19 @@
 #define EL_FEATURE_DOCK_MODE 1
 #endif
 
+/* Headphone-unplug auto-pause, pause-on-mute, and optional reconnect resume */
+#ifndef EL_FEATURE_SMART_PLAYBACK
+#define EL_FEATURE_SMART_PLAYBACK 1
+#endif
+
+/* Smooth offline-only crossfade strictly when disconnected from Wi-Fi */
+#ifndef EL_FEATURE_OFFLINE_CROSSFADE
+#define EL_FEATURE_OFFLINE_CROSSFADE 1
+#endif
+
+/* Wikipedia track backstory sheet (Music DNA) */
+#ifndef EL_FEATURE_MUSIC_DNA
+#define EL_FEATURE_MUSIC_DNA 1
+#endif
+
 #endif /* EL_FEATURES_H */

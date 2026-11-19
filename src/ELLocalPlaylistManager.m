@@ -278,6 +278,44 @@ static NSString *el_local_playlists_dir(void) {
     return created;
 }
 
+- (ELLocalPlaylist *)upsertPlaylistWithId:(NSString *)playlistId name:(NSString *)name tracks:(NSArray *)tracks {
+    if (![playlistId isKindOfClass:[NSString class]]) return nil;
+    NSString *cleanId = [playlistId stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if ([cleanId length] == 0) return nil;
+    if ([cleanId length] > 128) cleanId = [cleanId substringToIndex:128];
+
+    NSString *cleanName = el_sanitize_playlist_name(name);
+    if ([cleanName length] == 0) cleanName = @"Downloaded Playlist";
+
+    NSMutableArray *deduped = [NSMutableArray arrayWithCapacity:[tracks count]];
+    NSMutableSet *seen = [NSMutableSet setWithCapacity:[tracks count]];
+    for (ELTrack *t in tracks) {
+        if ([t isKindOfClass:[ELTrack class]] && el_is_valid_video_id(t.videoId) && ![seen containsObject:t.videoId]) {
+            [seen addObject:t.videoId];
+            [deduped addObject:t];
+        }
+    }
+
+    ELLocalPlaylist *result = nil;
+    NSArray *snapshot = nil;
+    @synchronized(self) {
+        ELLocalPlaylist *pl = [self findPlaylistLocked:cleanId];
+        if (!pl) {
+            pl = [[[ELLocalPlaylist alloc] init] autorelease];
+            pl.playlistId = cleanId;
+            [_playlists insertObject:pl atIndex:0];
+        }
+        pl.name = cleanName;
+        [pl.tracks removeAllObjects];
+        [pl.tracks addObjectsFromArray:deduped];
+        result = [pl snapshotCopy];
+        snapshot = [self serializedSnapshotLocked];
+    }
+    [self saveSnapshotsToDisk:snapshot];
+    [self notifyChanged];
+    return result;
+}
+
 - (void)renamePlaylistId:(NSString *)playlistId toName:(NSString *)newName {
     NSString *clean = el_sanitize_playlist_name(newName);
     if ([clean length] == 0) return;
