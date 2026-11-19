@@ -411,6 +411,9 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
 }
 
 - (void)dealloc {
+    [_sleepTimer invalidate];
+    [_sleepTimer release]; _sleepTimer = nil;
+    [_sleepFireDate release]; _sleepFireDate = nil;
     [self stop];
     [self clearPreNextBuffer];
     [_preNextDir release];
@@ -723,6 +726,65 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
     if ([message length] == 0) return;
     NSDictionary *ui = [NSDictionary dictionaryWithObject:message forKey:@"message"];
     [[NSNotificationCenter defaultCenter] postNotificationName:ELPlayerToastNotification object:self userInfo:ui];
+}
+
+- (NSInteger)sleepTimerRemainingSeconds {
+    if (!_sleepFireDate) return 0;
+    NSTimeInterval rem = [_sleepFireDate timeIntervalSinceNow];
+    if (rem <= 0) return 0;
+    return (NSInteger)ceil(rem);
+}
+
+- (void)setSleepTimerMinutes:(NSInteger)minutes {
+    if (![NSThread isMainThread]) {
+        [self performSelectorOnMainThread:@selector(setSleepTimerMinutesNumber:)
+                               withObject:[NSNumber numberWithInteger:minutes]
+                            waitUntilDone:NO];
+        return;
+    }
+    [_sleepTimer invalidate];
+    [_sleepTimer release]; _sleepTimer = nil;
+    [_sleepFireDate release]; _sleepFireDate = nil;
+
+    if (minutes <= 0) {
+        _sleepTimerRemainingSeconds = 0;
+        [self postToast:@"Sleep timer off"];
+        return;
+    }
+
+    NSTimeInterval secs = (NSTimeInterval)minutes * 60.0;
+    _sleepFireDate = [[NSDate dateWithTimeIntervalSinceNow:secs] retain];
+    _sleepTimerRemainingSeconds = minutes * 60;
+    _sleepTimer = [[NSTimer scheduledTimerWithTimeInterval:1.0
+                                                     target:self
+                                                   selector:@selector(onSleepTimerTick:)
+                                                   userInfo:nil
+                                                    repeats:YES] retain];
+    [self postToast:[NSString stringWithFormat:@"Sleep timer: %ld min", (long)minutes]];
+}
+
+- (void)setSleepTimerMinutesNumber:(NSNumber *)num {
+    [self setSleepTimerMinutes:[num integerValue]];
+}
+
+- (void)onSleepTimerTick:(NSTimer *)timer {
+    if (!_sleepFireDate) {
+        [_sleepTimer invalidate];
+        [_sleepTimer release]; _sleepTimer = nil;
+        _sleepTimerRemainingSeconds = 0;
+        return;
+    }
+    NSTimeInterval rem = [_sleepFireDate timeIntervalSinceNow];
+    if (rem <= 0) {
+        [_sleepTimer invalidate];
+        [_sleepTimer release]; _sleepTimer = nil;
+        [_sleepFireDate release]; _sleepFireDate = nil;
+        _sleepTimerRemainingSeconds = 0;
+        [self pause];
+        [self postToast:@"Sleep timer ended"];
+    } else {
+        _sleepTimerRemainingSeconds = (NSInteger)ceil(rem);
+    }
 }
 
 - (double)currentTime {

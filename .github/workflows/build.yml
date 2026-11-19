@@ -1,0 +1,115 @@
+name: Build EchoLegacy (iOS 4.1 armv6)
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-armv6:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout EchoLegacy
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang make zip unzip curl xz-utils
+
+      - name: Cache Theos Linux toolchain & iPhoneOS4.1.sdk
+        id: cache-sdk
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/el_ci_toolchain
+            /tmp/el_ci_sdks
+            /tmp/el_ci_mbedtls
+          key: el-ios41-armv6-v1
+
+      - name: Fetch Linux iOS Toolchain, iPhoneOS4.1.sdk & mbedTLS 2.28.10
+        if: steps.cache-sdk.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p /tmp/el_ci_toolchain /tmp/el_ci_sdks /tmp/el_ci_mbedtls
+          echo "Downloading L1ghtmann Linux iOS toolchain..."
+          curl -fsSL https://github.com/L1ghtmann/llvm-project/releases/latest/download/iOSToolchain-x86_64.tar.xz \
+            | tar -xJ -C /tmp/el_ci_toolchain
+
+          echo "Sparse-checking out iPhoneOS4.1.sdk..."
+          git clone --depth=1 --filter=blob:none --no-checkout https://github.com/Sn0wCooder/theos-sdks.git /tmp/sdk-src
+          cd /tmp/sdk-src
+          git sparse-checkout init --no-cone
+          git sparse-checkout set '/iPhoneOS4.1.sdk/**'
+          git checkout
+          cat iPhoneOS4.1.sdk/iPhoneOS4.1.sdk.zip.* > /tmp/iPhoneOS4.1.sdk.zip
+          unzip -q /tmp/iPhoneOS4.1.sdk.zip -d /tmp/el_ci_sdks/
+          rm -rf /tmp/sdk-src /tmp/iPhoneOS4.1.sdk.zip
+
+          echo "Downloading mbedTLS 2.28.10..."
+          curl -fsSL https://github.com/Mbed-TLS/mbedtls/archive/refs/tags/v2.28.10.tar.gz \
+            -o /tmp/el_ci_mbedtls/mbedtls-2.28.10.tar.gz
+
+      - name: Unpack mbedTLS preserving el_user_config.h
+        run: |
+          cp third_party/mbedtls/include/mbedtls/el_user_config.h /tmp/el_user_config.h
+          rm -rf third_party/mbedtls
+          tar -xzf /tmp/el_ci_mbedtls/mbedtls-2.28.10.tar.gz -C third_party/
+          mv third_party/mbedtls-2.28.10 third_party/mbedtls
+          cp /tmp/el_user_config.h third_party/mbedtls/include/mbedtls/el_user_config.h
+
+      - name: Resolve toolchain bin path & build mbedTLS + EchoLegacy IPA
+        run: |
+          TC_BIN="$(dirname "$(find /tmp/el_ci_toolchain -name clang -type f | head -n1)")"
+          SDK_DIR="/tmp/el_ci_sdks/iPhoneOS4.1.sdk"
+          echo "Using TOOLCHAIN=$TC_BIN"
+          echo "Using SDK=$SDK_DIR"
+          make -j"$(nproc)" TOOLCHAIN="$TC_BIN" SDK="$SDK_DIR" mbedtls
+          make -j"$(nproc)" TOOLCHAIN="$TC_BIN" SDK="$SDK_DIR" ipa
+          "$TC_BIN/lipo" -info build/EchoLegacy.app/EchoLegacy
+          ls -lh build/EchoLegacy.app/EchoLegacy build/EchoLegacy.ipa
+
+      - name: Prepare release metadata & assets
+        id: meta
+        run: |
+          mkdir -p dist
+          cp build/EchoLegacy.ipa dist/EchoLegacy.ipa
+          cp build/EchoLegacy.app/EchoLegacy dist/EchoLegacy
+          cp build/EchoLegacy.app/Info.plist dist/Info.plist
+          cp build/EchoLegacy.app/cacert.pem dist/cacert.pem
+          SHORT_SHA="${GITHUB_SHA::7}"
+          BUILD_NUM="${GITHUB_RUN_NUMBER}"
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "$TAG" != v* ]]; then
+            TAG="latest"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          echo "build_num=$BUILD_NUM" >> "$GITHUB_OUTPUT"
+          printf '{"tag":"%s","build":%s,"sha":"%s"}\n' "$TAG" "$BUILD_NUM" "$SHORT_SHA" > dist/version.json
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: EchoLegacy-armv6-build
+          path: dist/
+
+      - name: Publish GitHub Release (for On-Device Auto-Update)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: "EchoLegacy Build #${{ steps.meta.outputs.build_num }} (${{ steps.meta.outputs.short_sha }})"
+          body: |
+            Automated iOS 4.1 (`armv6`) build from commit `${{ github.sha }}`.
+            - Tap **Check for Updates** in EchoLegacy's **Account** tab to update directly on-device.
+            - Or sideload `EchoLegacy.ipa`.
+          prerelease: false
+          files: |
+            dist/EchoLegacy.ipa
+            dist/EchoLegacy
+            dist/Info.plist
+            dist/cacert.pem
+            dist/version.json

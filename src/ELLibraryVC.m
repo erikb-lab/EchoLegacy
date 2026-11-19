@@ -16,9 +16,11 @@
         self.title = @"Library";
         self.tabBarItem = [[[UITabBarItem alloc] initWithTitle:@"Library"
                                                          image:[ELTheme tabIconLibrary]
-                                                           tag:0] autorelease];
+                                                           tag:2] autorelease];
         _playlists = [[NSArray alloc] init];
         _likedSongs = [[NSArray alloc] init];
+        _filterButtons = [[NSMutableArray alloc] init];
+        _filterMode = 0;
     }
     return self;
 }
@@ -36,6 +38,7 @@
     [_emptyFooter release]; _emptyFooter = nil;
     [_emptyLabel release]; _emptyLabel = nil;
     [_emptyActionBtn release]; _emptyActionBtn = nil;
+    [_filterButtons removeAllObjects];
 }
 
 - (void)viewDidUnload {
@@ -47,6 +50,7 @@
     [self releaseViewOutlets];
     [_playlists release];
     [_likedSongs release];
+    [_filterButtons release];
     [super dealloc];
 }
 
@@ -104,8 +108,25 @@
     return btn;
 }
 
+- (void)updateFilterChips {
+    UIImage *selBg = [ELTheme stretchablePillImageWithHeight:28.0f color:[ELTheme accentColor]];
+    UIImage *unselBg = [ELTheme stretchablePillImageWithHeight:28.0f color:[ELTheme surfaceColor]];
+    for (NSUInteger i = 0; i < [_filterButtons count]; i++) {
+        UIButton *btn = [_filterButtons objectAtIndex:i];
+        BOOL active = ((NSInteger)i == _filterMode);
+        [btn setBackgroundImage:(active ? selBg : unselBg) forState:UIControlStateNormal];
+        [btn setTitleColor:(active ? [UIColor whiteColor] : [ELTheme textSecondaryColor]) forState:UIControlStateNormal];
+    }
+}
+
+- (void)onFilterChipTapped:(UIButton *)sender {
+    _filterMode = sender.tag;
+    [self updateFilterChips];
+    [_tableView reloadData];
+}
+
 - (void)buildQuickTilesHeader {
-    _quickTilesHeader = [[UIView alloc] initWithFrame:CGRectMake(0.0f, 0.0f, 320.0f, 144.0f)];
+    _quickTilesHeader = [[UIView alloc] initWithFrame:CGRectMake(0.0f, 0.0f, 320.0f, 182.0f)];
     _quickTilesHeader.backgroundColor = [ELTheme backgroundColor];
     _quickTilesHeader.opaque = YES;
 
@@ -148,6 +169,24 @@
                                          outSubtitle:&_syncSubLabel
                                          outIconView:&_syncIconView];
     [_quickTilesHeader addSubview:syncBtn];
+
+    [_filterButtons removeAllObjects];
+    NSArray *titles = [NSArray arrayWithObjects:@"All", @"Playlists", @"Liked", nil];
+    CGFloat chipX = 12.0f;
+    for (NSUInteger i = 0; i < [titles count]; i++) {
+        NSString *t = [titles objectAtIndex:i];
+        CGFloat w = (i == 0) ? 56.0f : ((i == 1) ? 84.0f : 68.0f);
+        UIButton *chip = [UIButton buttonWithType:UIButtonTypeCustom];
+        chip.frame = CGRectMake(chipX, 144.0f, w, 28.0f);
+        chip.tag = (NSInteger)i;
+        chip.titleLabel.font = [UIFont boldSystemFontOfSize:12.0f];
+        [chip setTitle:t forState:UIControlStateNormal];
+        [chip addTarget:self action:@selector(onFilterChipTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [_quickTilesHeader addSubview:chip];
+        [_filterButtons addObject:chip];
+        chipX += w + 8.0f;
+    }
+    [self updateFilterChips];
 }
 
 - (void)buildEmptyFooter {
@@ -310,7 +349,7 @@
 }
 
 - (void)onOpenDownloads {
-    self.tabBarController.selectedIndex = 2;
+    self.tabBarController.selectedIndex = 3;
 }
 
 - (void)onShuffleQuick {
@@ -352,7 +391,7 @@
 
 - (void)onEmptyAction {
     if (![[ELAuthManager sharedManager] isSignedIn]) {
-        self.tabBarController.selectedIndex = 3; /* Jump to Account tab */
+        self.tabBarController.selectedIndex = 4; /* Jump to Account tab */
     } else {
         [self onSyncTapped];
     }
@@ -360,7 +399,7 @@
 
 - (void)onSyncTapped {
     if (![[ELAuthManager sharedManager] isSignedIn]) {
-        self.tabBarController.selectedIndex = 3;
+        self.tabBarController.selectedIndex = 4;
         return;
     }
     if (_syncing) return;
@@ -374,6 +413,7 @@
 
 - (void)syncWorker {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    [NSThread setThreadPriority:0.25];
     NSString *err = nil;
     BOOL ok = [[ELYouTubeClient sharedClient] syncLibraryWithError:&err];
     NSMutableDictionary *res = [NSMutableDictionary dictionaryWithObject:[NSNumber numberWithBool:ok] forKey:@"ok"];
@@ -409,13 +449,14 @@
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     (void)tableView;
-    return (section == 0) ? [_playlists count] : [_likedSongs count];
+    if (section == 0) return (_filterMode == 2) ? 0 : [_playlists count];
+    return (_filterMode == 1) ? 0 : [_likedSongs count];
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
     (void)tableView;
-    if (section == 0 && [_playlists count] == 0) return 0.0f;
-    if (section == 1 && [_likedSongs count] == 0) return 0.0f;
+    if (section == 0 && (_filterMode == 2 || [_playlists count] == 0)) return 0.0f;
+    if (section == 1 && (_filterMode == 1 || [_likedSongs count] == 0)) return 0.0f;
     return 28.0f;
 }
 

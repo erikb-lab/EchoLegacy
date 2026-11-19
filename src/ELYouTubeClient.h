@@ -34,6 +34,8 @@ extern NSString *const ELLibraryUpdatedNotification;
 
 /* All network methods are synchronous — call from a background thread */
 - (NSArray *)searchSongs:(NSString *)query error:(NSString **)outError;
+- (NSArray *)fetchHomeTracksForMood:(NSString *)mood error:(NSString **)outError;
+- (NSArray *)fetchRadioTracksForVideoId:(NSString *)videoId error:(NSString **)outError;
 - (ELStreamInfo *)resolveAudioStreamForVideoId:(NSString *)videoId error:(NSString **)outError;
 - (void)invalidateCachedStreamForVideoId:(NSString *)videoId;
 - (BOOL)syncLibraryWithError:(NSString **)outError;

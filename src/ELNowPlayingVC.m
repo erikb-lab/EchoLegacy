@@ -2,6 +2,7 @@
 #import "ELAudioEngine.h"
 #import "ELDownloadManager.h"
 #import "ELImageCache.h"
+#import "ELLyricsClient.h"
 #import "ELQueueVC.h"
 #import "ELTheme.h"
 #import "ELYouTubeClient.h"
@@ -120,7 +121,7 @@
     [closeBtn addTarget:self action:@selector(onClose) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:closeBtn];
 
-    UIImageView *sourcePillBg = [[[UIImageView alloc] initWithFrame:CGRectMake(94.0f, 16.0f, 132.0f, 22.0f)] autorelease];
+    UIImageView *sourcePillBg = [[[UIImageView alloc] initWithFrame:CGRectMake(52.0f, 16.0f, 102.0f, 22.0f)] autorelease];
     sourcePillBg.image = [ELTheme stretchablePillImageWithHeight:22.0f color:pillDark];
     [self.view addSubview:sourcePillBg];
 
@@ -130,6 +131,42 @@
     _sourceBadge.textAlignment = UITextAlignmentCenter;
     _sourceBadge.textColor = secondaryWhite;
     [self.view addSubview:_sourceBadge];
+
+    _lyricsBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
+    _lyricsBtn.frame = CGRectMake(160.0f, 13.0f, 68.0f, 28.0f);
+    [_lyricsBtn setBackgroundImage:[ELTheme stretchablePillImageWithHeight:28.0f color:pillDark] forState:UIControlStateNormal];
+    [_lyricsBtn setBackgroundImage:[ELTheme stretchablePillImageWithHeight:28.0f color:pillDarkHi] forState:UIControlStateHighlighted];
+    [_lyricsBtn setImage:[ELTheme iconLyricsSize:14.0f color:[UIColor whiteColor]] forState:UIControlStateNormal];
+    [_lyricsBtn setTitle:@" Lyrics" forState:UIControlStateNormal];
+    [_lyricsBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    _lyricsBtn.titleLabel.font = [UIFont boldSystemFontOfSize:11.0f];
+    [_lyricsBtn addTarget:self action:@selector(onLyricsTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:_lyricsBtn];
+
+    /* Dark-translucent synced lyrics overlay (toggled over album art) */
+    _lyricsContainer = [[UIView alloc] initWithFrame:CGRectMake(0.0f, 52.0f, 320.0f, 212.0f)];
+    _lyricsContainer.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.54f];
+    _lyricsContainer.hidden = YES;
+    [self.view addSubview:_lyricsContainer];
+
+    _lyricsTable = [[UITableView alloc] initWithFrame:_lyricsContainer.bounds style:UITableViewStylePlain];
+    _lyricsTable.backgroundColor = [UIColor clearColor];
+    _lyricsTable.separatorStyle = UITableViewCellSeparatorStyleNone;
+    _lyricsTable.showsVerticalScrollIndicator = NO;
+    _lyricsTable.dataSource = self;
+    _lyricsTable.delegate = self;
+    [_lyricsContainer addSubview:_lyricsTable];
+
+    _lyricsStatusLabel = [[UILabel alloc] initWithFrame:CGRectMake(20.0f, 76.0f, 280.0f, 60.0f)];
+    _lyricsStatusLabel.backgroundColor = [UIColor clearColor];
+    _lyricsStatusLabel.font = [UIFont systemFontOfSize:14.0f];
+    _lyricsStatusLabel.textColor = secondaryWhite;
+    _lyricsStatusLabel.textAlignment = UITextAlignmentCenter;
+    _lyricsStatusLabel.numberOfLines = 2;
+    _lyricsStatusLabel.text = @"Searching lyrics...";
+    [_lyricsContainer addSubview:_lyricsStatusLabel];
+
+    _activeLyricIndex = -1;
 
     _queueBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
     _queueBtn.frame = CGRectMake(234.0f, 10.0f, 34.0f, 34.0f);
@@ -147,8 +184,8 @@
     [_downloadBtn addTarget:self action:@selector(onDownloadTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:_downloadBtn];
 
-    /* Left-aligned bold track title & artist + right-side circular Heart button */
-    _titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(20.0f, 268.0f, 232.0f, 24.0f)];
+    /* Left-aligned bold track title & artist + right-side (•••) Actions & Heart pills */
+    _titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(20.0f, 268.0f, 198.0f, 24.0f)];
     _titleLabel.backgroundColor = [UIColor clearColor];
     _titleLabel.font = [UIFont boldSystemFontOfSize:18.0f];
     _titleLabel.textColor = [UIColor whiteColor];
@@ -156,7 +193,7 @@
     _titleLabel.lineBreakMode = UILineBreakModeTailTruncation;
     [self.view addSubview:_titleLabel];
 
-    _artistLabel = [[UILabel alloc] initWithFrame:CGRectMake(20.0f, 294.0f, 232.0f, 19.0f)];
+    _artistLabel = [[UILabel alloc] initWithFrame:CGRectMake(20.0f, 294.0f, 198.0f, 19.0f)];
     _artistLabel.backgroundColor = [UIColor clearColor];
     _artistLabel.font = [UIFont systemFontOfSize:14.0f];
     _artistLabel.textColor = secondaryWhite;
@@ -164,8 +201,16 @@
     _artistLabel.lineBreakMode = UILineBreakModeTailTruncation;
     [self.view addSubview:_artistLabel];
 
+    _moreBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
+    _moreBtn.frame = CGRectMake(224.0f, 273.0f, 36.0f, 36.0f);
+    [_moreBtn setBackgroundImage:[ELTheme circlePillImageWithSize:36.0f color:pillLight] forState:UIControlStateNormal];
+    [_moreBtn setBackgroundImage:[ELTheme circlePillImageWithSize:36.0f color:pillLightHi] forState:UIControlStateHighlighted];
+    [_moreBtn setImage:[ELTheme iconMoreSize:18.0f color:[UIColor whiteColor]] forState:UIControlStateNormal];
+    [_moreBtn addTarget:self action:@selector(onMoreTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:_moreBtn];
+
     _likeBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-    _likeBtn.frame = CGRectMake(262.0f, 272.0f, 38.0f, 38.0f);
+    _likeBtn.frame = CGRectMake(266.0f, 272.0f, 38.0f, 38.0f);
     [_likeBtn addTarget:self action:@selector(onLikeTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:_likeBtn];
 
@@ -274,8 +319,13 @@
     [_artFadeLayer release]; _artFadeLayer = nil;
     [_artView release]; _artView = nil;
     [_sourceBadge release]; _sourceBadge = nil;
+    [_lyricsBtn release]; _lyricsBtn = nil;
+    [_lyricsContainer release]; _lyricsContainer = nil;
+    [_lyricsTable release]; _lyricsTable = nil;
+    [_lyricsStatusLabel release]; _lyricsStatusLabel = nil;
     [_titleLabel release]; _titleLabel = nil;
     [_artistLabel release]; _artistLabel = nil;
+    [_moreBtn release]; _moreBtn = nil;
     [_likeBtn release]; _likeBtn = nil;
     [_scrubber release]; _scrubber = nil;
     [_elapsedLabel release]; _elapsedLabel = nil;
@@ -302,6 +352,8 @@
 
 - (void)dealloc {
     [self releaseViewOutlets];
+    [_lyricLines release];
+    [_lyricsVideoId release];
     [_inFlightLikeVideoId release];
     [_currentVideoId release];
     [super dealloc];
@@ -406,6 +458,7 @@
 
 - (void)likeWorker:(NSDictionary *)args {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    [NSThread setThreadPriority:0.25];
     ELTrack *track = [args objectForKey:@"track"];
     BOOL targetLiked = [[args objectForKey:@"targetLiked"] boolValue];
     NSString *err = nil;
@@ -492,6 +545,9 @@
         _elapsedLabel.text = [ELTrack formatSeconds:cur];
         _scrubber.value = (dur > 0.0) ? (float)(cur / dur) : 0.0f;
     }
+    if (_showingLyrics && [_lyricLines count] > 0) {
+        [self updateActiveLyricForTime:cur];
+    }
 }
 
 - (void)setArtworkImage:(UIImage *)img forKey:(NSString *)artKey animated:(BOOL)animated {
@@ -499,7 +555,7 @@
     _artView.image = img;
     [_loadedArtKey release];
     _loadedArtKey = [artKey copy];
-    [self applyBackdropColor:[ELTheme dominantBackdropColorFromImage:img] animated:animated];
+    [self applyBackdropColor:[ELTheme dominantBackdropColorFromImage:img cacheKey:artKey] animated:animated];
 }
 
 - (void)refreshAll {
@@ -530,6 +586,9 @@
     if (trackChanged) {
         [_currentVideoId release];
         _currentVideoId = [track.videoId copy];
+        if (_showingLyrics) {
+            [self loadLyricsForCurrentTrack];
+        }
     }
 
     _titleLabel.text = track.title;
@@ -605,6 +664,249 @@
     UIImage *img = [info objectForKey:@"image"];
     if (img && _loadedArtURL && [url isEqualToString:_loadedArtURL]) {
         [self setArtworkImage:img forKey:url animated:YES];
+    }
+}
+
+#pragma mark - Synced Lyrics
+
+- (void)updateLyricsButtonVisual {
+    UIColor *bg = _showingLyrics ? [ELTheme accentColor] : [UIColor colorWithWhite:0.0f alpha:0.40f];
+    UIColor *bgHi = _showingLyrics ? [ELTheme darkerShadeOfColor:[ELTheme accentColor] factor:0.78f] : [UIColor colorWithWhite:0.0f alpha:0.62f];
+    [_lyricsBtn setBackgroundImage:[ELTheme stretchablePillImageWithHeight:28.0f color:bg] forState:UIControlStateNormal];
+    [_lyricsBtn setBackgroundImage:[ELTheme stretchablePillImageWithHeight:28.0f color:bgHi] forState:UIControlStateHighlighted];
+}
+
+- (void)onLyricsTapped {
+    _showingLyrics = !_showingLyrics;
+    _lyricsContainer.hidden = !_showingLyrics;
+    [self updateLyricsButtonVisual];
+    if (_showingLyrics) {
+        ELTrack *track = [[ELAudioEngine sharedEngine] currentTrack];
+        if (track && (!_lyricsVideoId || ![_lyricsVideoId isEqualToString:track.videoId])) {
+            [self loadLyricsForCurrentTrack];
+        } else if ([_lyricLines count] > 0) {
+            [self updateActiveLyricForTime:[[ELAudioEngine sharedEngine] currentTime]];
+        }
+    }
+}
+
+- (void)loadLyricsForCurrentTrack {
+    ELTrack *track = [[ELAudioEngine sharedEngine] currentTrack];
+    if (!track || [track.videoId length] == 0) return;
+
+    _lyricsGen++;
+    _activeLyricIndex = -1;
+    [_lyricsVideoId release];
+    _lyricsVideoId = [track.videoId copy];
+    [_lyricLines release];
+    _lyricLines = nil;
+    [_lyricsTable reloadData];
+    _lyricsStatusLabel.text = @"Searching lyrics...";
+    _lyricsStatusLabel.hidden = NO;
+
+    NSDictionary *args = [NSDictionary dictionaryWithObjectsAndKeys:
+                          track, @"track",
+                          [NSNumber numberWithInteger:_lyricsGen], @"gen",
+                          nil];
+    [NSThread detachNewThreadSelector:@selector(lyricsWorker:) toTarget:self withObject:args];
+}
+
+- (void)lyricsWorker:(NSDictionary *)args {
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    [NSThread setThreadPriority:0.25];
+    ELTrack *track = [args objectForKey:@"track"];
+    NSNumber *gen = [args objectForKey:@"gen"];
+
+    NSArray *lines = [[ELLyricsClient sharedClient] cachedLyricsForVideoId:track.videoId];
+    NSString *err = nil;
+    if (!lines || [lines count] == 0) {
+        lines = [[ELLyricsClient sharedClient] fetchLyricsForTrack:track error:&err];
+    }
+
+    NSMutableDictionary *res = [NSMutableDictionary dictionaryWithObjectsAndKeys:
+                                gen, @"gen",
+                                track.videoId ? track.videoId : @"", @"videoId",
+                                nil];
+    if (lines) [res setObject:lines forKey:@"lines"];
+    if (err)   [res setObject:err forKey:@"error"];
+    [self performSelectorOnMainThread:@selector(onLyricsFinished:) withObject:res waitUntilDone:NO];
+    [pool release];
+}
+
+- (void)onLyricsFinished:(NSDictionary *)res {
+    if ([[res objectForKey:@"gen"] integerValue] != _lyricsGen) return;
+    NSArray *lines = [res objectForKey:@"lines"];
+    [_lyricLines release];
+    if (lines && [lines count] > 0) {
+        _lyricLines = [lines retain];
+        _lyricsStatusLabel.hidden = YES;
+        _activeLyricIndex = -1;
+        [_lyricsTable reloadData];
+        [self updateActiveLyricForTime:[[ELAudioEngine sharedEngine] currentTime]];
+    } else {
+        _lyricLines = nil;
+        _lyricsStatusLabel.text = @"No synced lyrics found";
+        _lyricsStatusLabel.hidden = NO;
+        [_lyricsTable reloadData];
+    }
+}
+
+- (void)updateActiveLyricForTime:(double)curTime {
+    if (!_lyricLines || [_lyricLines count] == 0) return;
+    ELLyricLine *first = [_lyricLines objectAtIndex:0];
+    if (first.timeSeconds < 0.0) return;
+
+    NSInteger found = -1;
+    NSInteger count = (NSInteger)[_lyricLines count];
+    for (NSInteger i = 0; i < count; i++) {
+        ELLyricLine *line = [_lyricLines objectAtIndex:(NSUInteger)i];
+        if (line.timeSeconds >= 0.0 && line.timeSeconds <= curTime + 0.25) {
+            found = i;
+        } else if (line.timeSeconds > curTime + 0.25) {
+            break;
+        }
+    }
+
+    if (found != _activeLyricIndex) {
+        _activeLyricIndex = found;
+        [_lyricsTable reloadData];
+        if (_activeLyricIndex >= 0 && _activeLyricIndex < count) {
+            NSIndexPath *ip = [NSIndexPath indexPathForRow:_activeLyricIndex inSection:0];
+            [_lyricsTable scrollToRowAtIndexPath:ip atScrollPosition:UITableViewScrollPositionMiddle animated:YES];
+        }
+    }
+}
+
+#pragma mark - Lyrics UITableViewDataSource
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    (void)tableView; (void)section;
+    return _lyricLines ? (NSInteger)[_lyricLines count] : 0;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView; (void)indexPath;
+    return 38.0f;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    static NSString *lid = @"ELLyricCell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:lid];
+    if (!cell) {
+        cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:lid] autorelease];
+        cell.backgroundColor = [UIColor clearColor];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        cell.textLabel.backgroundColor = [UIColor clearColor];
+        cell.textLabel.textAlignment = UITextAlignmentCenter;
+        cell.textLabel.numberOfLines = 2;
+        cell.textLabel.lineBreakMode = UILineBreakModeWordWrap;
+    }
+    ELLyricLine *line = [_lyricLines objectAtIndex:indexPath.row];
+    cell.textLabel.text = line.text;
+    if (line.timeSeconds < 0.0) {
+        cell.textLabel.font = [UIFont systemFontOfSize:14.0f];
+        cell.textLabel.textColor = [UIColor colorWithWhite:1.0f alpha:0.86f];
+    } else if ((NSInteger)indexPath.row == _activeLyricIndex) {
+        cell.textLabel.font = [UIFont boldSystemFontOfSize:16.0f];
+        cell.textLabel.textColor = [UIColor whiteColor];
+    } else {
+        cell.textLabel.font = [UIFont systemFontOfSize:14.0f];
+        cell.textLabel.textColor = [UIColor colorWithWhite:1.0f alpha:0.46f];
+    }
+    return cell;
+}
+
+#pragma mark - More Actions (Radio Mix, Sleep Timer, Download)
+
+- (void)onMoreTapped {
+    ELTrack *track = [[ELAudioEngine sharedEngine] currentTrack];
+    if (!track) return;
+
+    BOOL downloaded = [[ELDownloadManager sharedManager] isDownloaded:track.videoId];
+    NSString *dlTitle = downloaded ? @"Remove Offline Download" : @"Download for Offline";
+
+    NSInteger rem = [[ELAudioEngine sharedEngine] sleepTimerRemainingSeconds];
+    NSString *sleepTitle = (rem > 0)
+        ? [NSString stringWithFormat:@"Sleep Timer (%ldm left)", (long)((rem + 59) / 60)]
+        : @"Sleep Timer";
+
+    UIActionSheet *sheet = [[[UIActionSheet alloc] initWithTitle:track.title
+                                                        delegate:self
+                                               cancelButtonTitle:@"Cancel"
+                                          destructiveButtonTitle:nil
+                                               otherButtonTitles:@"Start Radio Mix", sleepTitle, dlTitle, nil] autorelease];
+    sheet.actionSheetStyle = UIActionSheetStyleBlackTranslucent;
+    sheet.tag = 1;
+    [sheet showInView:self.view];
+}
+
+- (void)showSleepTimerSheet {
+    UIActionSheet *sheet = [[[UIActionSheet alloc] initWithTitle:@"Sleep Timer"
+                                                        delegate:self
+                                               cancelButtonTitle:@"Cancel"
+                                          destructiveButtonTitle:nil
+                                               otherButtonTitles:@"15 min", @"30 min", @"60 min", @"Turn Off", nil] autorelease];
+    sheet.actionSheetStyle = UIActionSheetStyleBlackTranslucent;
+    sheet.tag = 2;
+    [sheet showInView:self.view];
+}
+
+- (void)actionSheet:(UIActionSheet *)actionSheet clickedButtonAtIndex:(NSInteger)buttonIndex {
+    if (buttonIndex == actionSheet.cancelButtonIndex) return;
+
+    if (actionSheet.tag == 1) {
+        ELTrack *track = [[ELAudioEngine sharedEngine] currentTrack];
+        if (!track) return;
+        if (buttonIndex == 0) {
+            [[ELAudioEngine sharedEngine] postToast:@"Starting Radio Mix..."];
+            [NSThread detachNewThreadSelector:@selector(radioWorker:) toTarget:self withObject:track.videoId];
+        } else if (buttonIndex == 1) {
+            [self showSleepTimerSheet];
+        } else if (buttonIndex == 2) {
+            ELDownloadManager *dm = [ELDownloadManager sharedManager];
+            if ([dm isDownloaded:track.videoId]) {
+                [dm deleteDownloadForVideoId:track.videoId];
+                [[ELAudioEngine sharedEngine] postToast:@"Removed offline download"];
+            } else {
+                [dm downloadTrack:track];
+                [[ELAudioEngine sharedEngine] postToast:@"Downloading..."];
+            }
+            [self refreshDownloadBtn];
+        }
+    } else if (actionSheet.tag == 2) {
+        NSInteger mins = 0;
+        if (buttonIndex == 0) mins = 15;
+        else if (buttonIndex == 1) mins = 30;
+        else if (buttonIndex == 2) mins = 60;
+        else if (buttonIndex == 3) mins = 0;
+        [[ELAudioEngine sharedEngine] setSleepTimerMinutes:mins];
+        NSString *msg = (mins > 0)
+            ? [NSString stringWithFormat:@"Sleep timer: %ld min", (long)mins]
+            : @"Sleep timer off";
+        [[ELAudioEngine sharedEngine] postToast:msg];
+    }
+}
+
+- (void)radioWorker:(NSString *)videoId {
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    [NSThread setThreadPriority:0.25];
+    NSString *err = nil;
+    NSArray *tracks = [[ELYouTubeClient sharedClient] fetchRadioTracksForVideoId:videoId error:&err];
+    NSMutableDictionary *res = [NSMutableDictionary dictionary];
+    if (tracks) [res setObject:tracks forKey:@"tracks"];
+    if (err)    [res setObject:err forKey:@"error"];
+    [self performSelectorOnMainThread:@selector(onRadioFinished:) withObject:res waitUntilDone:NO];
+    [pool release];
+}
+
+- (void)onRadioFinished:(NSDictionary *)res {
+    NSArray *tracks = [res objectForKey:@"tracks"];
+    NSString *err = [res objectForKey:@"error"];
+    if (tracks && [tracks count] > 0) {
+        [[ELAudioEngine sharedEngine] playTracks:tracks startingAtIndex:0];
+        [[ELAudioEngine sharedEngine] postToast:@"Radio Mix started"];
+    } else {
+        [[ELAudioEngine sharedEngine] postToast:(err ? err : @"Could not start Radio Mix")];
     }
 }
 

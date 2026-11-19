@@ -7,6 +7,7 @@
     UITableView *_tableView;
     UIActivityIndicatorView *_spinner;
     UILabel *_statusLabel;
+    UIButton *_downloadPlaylistBtn;
 }
 
 - (id)initWithPlaylist:(ELPlaylist *)playlist;

@@ -31,12 +31,22 @@ static NSString *el_history_path(void) {
     return self;
 }
 
-- (void)dealloc {
+- (void)releaseViewOutlets {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
-    [_searchBar release];
-    [_tableView release];
-    [_spinner release];
-    [_hintLabel release];
+    [_searchBarContainer release]; _searchBarContainer = nil;
+    [_searchField release]; _searchField = nil;
+    [_tableView release]; _tableView = nil;
+    [_spinner release]; _spinner = nil;
+    [_hintLabel release]; _hintLabel = nil;
+}
+
+- (void)viewDidUnload {
+    [self releaseViewOutlets];
+    [super viewDidUnload];
+}
+
+- (void)dealloc {
+    [self releaseViewOutlets];
     [_results release];
     [_recentQueries release];
     [super dealloc];
@@ -47,14 +57,42 @@ static NSString *el_history_path(void) {
     self.view.backgroundColor = [ELTheme backgroundColor];
     [ELTheme styleNavBar:self.navigationController.navigationBar];
 
-    _searchBar = [[UISearchBar alloc] initWithFrame:CGRectMake(0, 0, 320, 44)];
-    _searchBar.barStyle = UIBarStyleBlack;
-    _searchBar.tintColor = [ELTheme surfaceColor];
-    _searchBar.placeholder = @"Search YouTube Music...";
-    _searchBar.delegate = self;
-    [self.view addSubview:_searchBar];
+    _searchBarContainer = [[UIView alloc] initWithFrame:CGRectMake(0.0f, 0.0f, 320.0f, 54.0f)];
+    _searchBarContainer.backgroundColor = [ELTheme backgroundColor];
+    _searchBarContainer.opaque = YES;
+    _searchBarContainer.autoresizingMask = UIViewAutoresizingFlexibleWidth;
 
-    _tableView = [[UITableView alloc] initWithFrame:CGRectMake(0, 44, 320, self.view.bounds.size.height - 44)
+    UIImageView *pillBg = [[[UIImageView alloc] initWithFrame:CGRectMake(12.0f, 8.0f, 296.0f, 38.0f)] autorelease];
+    pillBg.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    pillBg.image = [ELTheme stretchablePillImageWithHeight:38.0f color:[ELTheme surfaceColor]];
+    pillBg.userInteractionEnabled = NO;
+    [_searchBarContainer addSubview:pillBg];
+
+    UIImageView *glassView = [[[UIImageView alloc] initWithFrame:CGRectMake(24.0f, 19.0f, 16.0f, 16.0f)] autorelease];
+    glassView.image = [ELTheme iconSearchSize:16.0f color:[ELTheme textSecondaryColor]];
+    glassView.contentMode = UIViewContentModeCenter;
+    glassView.userInteractionEnabled = NO;
+    [_searchBarContainer addSubview:glassView];
+
+    _searchField = [[UITextField alloc] initWithFrame:CGRectMake(48.0f, 12.0f, 248.0f, 30.0f)];
+    _searchField.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    _searchField.backgroundColor = [ELTheme surfaceColor];
+    _searchField.opaque = YES;
+    _searchField.textColor = [ELTheme textPrimaryColor];
+    _searchField.font = [UIFont systemFontOfSize:14.0f];
+    _searchField.placeholder = @"Search YouTube Music...";
+    _searchField.contentVerticalAlignment = UIControlContentVerticalAlignmentCenter;
+    _searchField.clearButtonMode = UITextFieldViewModeWhileEditing;
+    _searchField.returnKeyType = UIReturnKeySearch;
+    _searchField.autocorrectionType = UITextAutocorrectionTypeNo;
+    _searchField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    _searchField.delegate = self;
+    [_searchField addTarget:self action:@selector(onSearchTextChanged) forControlEvents:UIControlEventEditingChanged];
+    [_searchBarContainer addSubview:_searchField];
+
+    [self.view addSubview:_searchBarContainer];
+
+    _tableView = [[UITableView alloc] initWithFrame:CGRectMake(0.0f, 54.0f, 320.0f, self.view.bounds.size.height - 54.0f)
                                               style:UITableViewStylePlain];
     _tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     _tableView.dataSource = self;
@@ -156,29 +194,34 @@ static NSString *el_history_path(void) {
     [NSThread detachNewThreadSelector:@selector(searchWorker:) toTarget:self withObject:args];
 }
 
-#pragma mark - UISearchBarDelegate
+#pragma mark - UITextFieldDelegate
 
-- (void)searchBar:(UISearchBar *)searchBar textDidChange:(NSString *)searchText {
-    (void)searchBar;
-    if ([searchText length] == 0) {
+- (void)onSearchTextChanged {
+    if ([_searchField.text length] == 0) {
         _showingHistory = YES;
         [self updateEmptyHint];
         [_tableView reloadData];
     }
 }
 
-- (void)searchBarSearchButtonClicked:(UISearchBar *)searchBar {
-    [searchBar resignFirstResponder];
-    NSString *q = [searchBar.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    [self runSearchForQuery:q];
+- (BOOL)textFieldShouldClear:(UITextField *)textField {
+    (void)textField;
+    _showingHistory = YES;
+    [self updateEmptyHint];
+    [_tableView reloadData];
+    return YES;
 }
 
-- (void)searchBarCancelButtonClicked:(UISearchBar *)searchBar {
-    [searchBar resignFirstResponder];
+- (BOOL)textFieldShouldReturn:(UITextField *)textField {
+    [textField resignFirstResponder];
+    NSString *q = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    [self runSearchForQuery:q];
+    return YES;
 }
 
 - (void)searchWorker:(NSDictionary *)args {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    [NSThread setThreadPriority:0.25];
     NSString *q = [args objectForKey:@"query"];
     NSNumber *tok = [args objectForKey:@"token"];
     NSString *err = nil;
@@ -277,10 +320,10 @@ static NSString *el_history_path(void) {
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    [_searchBar resignFirstResponder];
+    [_searchField resignFirstResponder];
     if (_showingHistory) {
         NSString *q = [_recentQueries objectAtIndex:indexPath.row];
-        _searchBar.text = q;
+        _searchField.text = q;
         [self runSearchForQuery:q];
     } else {
         [[ELAudioEngine sharedEngine] playTracks:_results startingAtIndex:indexPath.row];

@@ -1,12 +1,15 @@
 #import "ELDownloadManager.h"
+#import "ELAudioEngine.h"
 #import "ELHTTPClient.h"
 #import "ELImageCache.h"
 #import "ELYouTubeClient.h"
+#import "ELLyricsClient.h"
 #import "el_fmp4_adts.h"
 #include <stdio.h>
 
 NSString *const ELDownloadsChangedNotification = @"ELDownloadsChangedNotification";
 NSString *const ELDownloadProgressNotification = @"ELDownloadProgressNotification";
+NSString *const ELDownloadBatchProgressNotification = @"ELDownloadBatchProgressNotification";
 
 /* Max 2 simultaneous TLS downloads to protect 128 MB RAM & ARM11 CPU */
 #define EL_MAX_CONCURRENT_DOWNLOADS 2
@@ -19,6 +22,7 @@ typedef struct {
     long long expectedBytes;
     long long receivedBytes;
     int lastReportedPct;
+    double lastPriority;
     BOOL writeError;
 } el_dl_ctx_t;
 
@@ -30,10 +34,23 @@ static void el_dl_on_adts_frame(const uint8_t *adts, size_t len, void *userData)
     }
 }
 
+@interface ELDownloadManager (Internal)
+- (double)currentWorkerPriority;
+- (NSUInteger)currentMaxConcurrentDownloads;
+- (void)loadIndex;
+- (void)pumpQueue;
+@end
+
 static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long long contentLength, void *userData) {
     el_dl_ctx_t *d = (el_dl_ctx_t *)userData;
     if (!d || d->writeError) return NO;
     if (![d->mgr isDownloading:d->videoId]) return NO; /* Cancelled */
+
+    double targetPrio = [d->mgr currentWorkerPriority];
+    if (targetPrio != d->lastPriority) {
+        d->lastPriority = targetPrio;
+        [NSThread setThreadPriority:targetPrio];
+    }
 
     if (el_fmp4_feed(d->fmp4, bytes, length) < 0) {
         d->writeError = YES;
@@ -75,6 +92,8 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
         _progressById = [[NSMutableDictionary alloc] init];
         _activeIds = [[NSMutableSet alloc] init];
         _cancelledIds = [[NSMutableSet alloc] init];
+        _retryCountById = [[NSMutableDictionary alloc] init];
+        _batchIds = [[NSMutableSet alloc] init];
         _dlBgTask = UIBackgroundTaskInvalid;
 
         NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
@@ -85,18 +104,39 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
                                                    attributes:nil
                                                         error:nil];
         [self loadIndex];
+
+        NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+        [nc addObserver:self selector:@selector(onPlayerStateChanged:) name:ELPlayerStateChangedNotification object:nil];
+        [nc addObserver:self selector:@selector(onAppDidEnterBackground:) name:UIApplicationDidEnterBackgroundNotification object:nil];
+        [nc addObserver:self selector:@selector(onAppDidBecomeActive:) name:UIApplicationDidBecomeActiveNotification object:nil];
     }
     return self;
 }
 
 - (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
     [_tracks release];
     [_pendingQueue release];
     [_progressById release];
     [_activeIds release];
     [_cancelledIds release];
+    [_retryCountById release];
+    [_batchIds release];
+    [_batchTitle release];
     [_downloadsDir release];
     [super dealloc];
+}
+
+- (NSInteger)batchTotal {
+    @synchronized(self) { return _batchTotal; }
+}
+
+- (NSInteger)batchCompleted {
+    @synchronized(self) { return _batchCompleted; }
+}
+
+- (BOOL)isBatchDownloading {
+    @synchronized(self) { return ([_batchIds count] > 0 && _batchTotal > 0); }
 }
 
 - (NSString *)indexPath {
@@ -230,6 +270,34 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
                                                         object:self];
 }
 
+- (void)postBatchProgressOnMain:(NSDictionary *)info {
+    [[NSNotificationCenter defaultCenter] postNotificationName:ELDownloadBatchProgressNotification
+                                                        object:self
+                                                      userInfo:info];
+}
+
+- (void)postBatchToastOnMain:(NSString *)msg {
+    if ([msg length] == 0) return;
+    NSDictionary *ui = [NSDictionary dictionaryWithObject:msg forKey:@"message"];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ELPlayerToastNotification
+                                                        object:self
+                                                      userInfo:ui];
+}
+
+- (void)dispatchBatchProgressNotification {
+    NSDictionary *info = nil;
+    @synchronized(self) {
+        BOOL active = ([_batchIds count] > 0 && _batchTotal > 0);
+        info = [NSDictionary dictionaryWithObjectsAndKeys:
+                (_batchTitle ? _batchTitle : @""), @"title",
+                [NSNumber numberWithInteger:_batchTotal], @"total",
+                [NSNumber numberWithInteger:_batchCompleted], @"completed",
+                [NSNumber numberWithBool:active], @"active",
+                nil];
+    }
+    [self performSelectorOnMainThread:@selector(postBatchProgressOnMain:) withObject:info waitUntilDone:NO];
+}
+
 - (void)updateProgressNumber:(NSDictionary *)info {
     NSString *vid = [info objectForKey:@"videoId"];
     NSNumber *prog = [info objectForKey:@"progress"];
@@ -241,12 +309,44 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
     [self performSelectorOnMainThread:@selector(postProgressOnMain:) withObject:info waitUntilDone:NO];
 }
 
+- (BOOL)isLiveStreamingActive {
+    BOOL bg = NO;
+    @synchronized(self) { bg = _isBackgrounded; }
+    if (bg) return NO;
+    ELAudioEngine *eng = [ELAudioEngine sharedEngine];
+    ELPlayerState st = eng.state;
+    return (st == ELPlayerStateLoading || (st == ELPlayerStatePlaying && !eng.isPlayingOffline));
+}
+
+- (double)currentWorkerPriority {
+    return [self isLiveStreamingActive] ? 0.15 : 0.55;
+}
+
+- (NSUInteger)currentMaxConcurrentDownloads {
+    return [self isLiveStreamingActive] ? 1 : EL_MAX_CONCURRENT_DOWNLOADS;
+}
+
+- (void)onPlayerStateChanged:(NSNotification *)note {
+    [self pumpQueue];
+}
+
+- (void)onAppDidEnterBackground:(NSNotification *)note {
+    @synchronized(self) { _isBackgrounded = YES; }
+    [self pumpQueue];
+}
+
+- (void)onAppDidBecomeActive:(NSNotification *)note {
+    @synchronized(self) { _isBackgrounded = NO; }
+    [self pumpQueue];
+}
+
 - (void)pumpQueue {
     NSMutableArray *toLaunch = [NSMutableArray array];
     BOOL anyRemaining = NO;
+    NSUInteger maxConcurrent = [self currentMaxConcurrentDownloads];
 
     @synchronized(self) {
-        while ([_activeIds count] < EL_MAX_CONCURRENT_DOWNLOADS && [_pendingQueue count] > 0) {
+        while ([_activeIds count] < maxConcurrent && [_pendingQueue count] > 0) {
             ELTrack *next = [[[_pendingQueue objectAtIndex:0] retain] autorelease];
             [_pendingQueue removeObjectAtIndex:0];
             if ([_cancelledIds containsObject:next.videoId]) {
@@ -315,8 +415,91 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
     }
 }
 
+- (void)downloadPlaylistTracks:(NSArray *)tracks title:(NSString *)title {
+    if (!tracks || [tracks count] == 0) return;
+
+    NSInteger totalCount = 0;
+    NSInteger alreadyCount = 0;
+    BOOL hasPending = NO;
+
+    @synchronized(self) {
+        [_batchIds removeAllObjects];
+        [_batchTitle release];
+        _batchTitle = [title copy];
+        _batchTotal = 0;
+        _batchCompleted = 0;
+
+        NSMutableSet *seenBatch = [NSMutableSet set];
+        for (ELTrack *track in tracks) {
+            if (!track || [track.videoId length] == 0) continue;
+            if ([seenBatch containsObject:track.videoId]) continue;
+            [seenBatch addObject:track.videoId];
+
+            totalCount++;
+            BOOL isDone = NO;
+            for (ELTrack *d in _tracks) {
+                if ([d.videoId isEqualToString:track.videoId]) { isDone = YES; break; }
+            }
+            if (isDone) {
+                alreadyCount++;
+                continue;
+            }
+
+            [_batchIds addObject:track.videoId];
+            [_retryCountById removeObjectForKey:track.videoId];
+
+            BOOL inFlight = [_activeIds containsObject:track.videoId];
+            if (!inFlight) {
+                for (ELTrack *q in _pendingQueue) {
+                    if ([q.videoId isEqualToString:track.videoId]) { inFlight = YES; break; }
+                }
+            }
+            if (!inFlight) {
+                [_cancelledIds removeObject:track.videoId];
+                [_pendingQueue addObject:track];
+            }
+        }
+
+        _batchTotal = totalCount;
+        _batchCompleted = alreadyCount;
+        hasPending = ([_batchIds count] > 0);
+    }
+
+    [self dispatchBatchProgressNotification];
+    if (!hasPending && totalCount > 0) {
+        NSString *msg = [NSString stringWithFormat:@"Playlist saved (%ld tracks)", (long)totalCount];
+        [self performSelectorOnMainThread:@selector(postBatchToastOnMain:) withObject:msg waitUntilDone:NO];
+        @synchronized(self) {
+            _batchTotal = 0;
+            _batchCompleted = 0;
+            [_batchTitle release]; _batchTitle = nil;
+        }
+    } else if (hasPending) {
+        [self performSelectorOnMainThread:@selector(postChangedOnMain) withObject:nil waitUntilDone:NO];
+        [self pumpQueue];
+    }
+}
+
+- (void)cancelBatchDownload {
+    NSArray *idsToCancel = nil;
+    @synchronized(self) {
+        idsToCancel = [_batchIds allObjects];
+        [_batchIds removeAllObjects];
+        _batchTotal = 0;
+        _batchCompleted = 0;
+        [_batchTitle release]; _batchTitle = nil;
+    }
+    for (NSString *vid in idsToCancel) {
+        [self cancelDownloadForVideoId:vid];
+    }
+    [self dispatchBatchProgressNotification];
+}
+
 - (void)downloadWorker:(ELTrack *)track {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    double initPrio = [self currentWorkerPriority];
+    [NSThread setThreadPriority:initPrio];
+    NSFileManager *fm = [[[NSFileManager alloc] init] autorelease];
     NSString *vid = track.videoId;
     NSString *finalAudio = [self localAudioPathForVideoId:vid];
     NSString *tmpAudio = [finalAudio stringByAppendingString:@".part"];
@@ -341,6 +524,7 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
             dctx.videoId = vid;
             dctx.expectedBytes = stream.contentLength;
             dctx.lastReportedPct = 1;
+            dctx.lastPriority = initPrio;
 
             NSDictionary *hdrs = [NSDictionary dictionaryWithObjectsAndKeys:
                                   stream.userAgent, @"User-Agent",
@@ -365,8 +549,8 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
             el_fmp4_destroy(dctx.fmp4);
 
             if (ok && (status == 200 || status == 206) && !dctx.writeError && [self isDownloading:vid] && dctx.receivedBytes > 1024) {
-                [[NSFileManager defaultManager] removeItemAtPath:finalAudio error:nil];
-                if ([[NSFileManager defaultManager] moveItemAtPath:tmpAudio toPath:finalAudio error:nil]) {
+                [fm removeItemAtPath:finalAudio error:nil];
+                if ([fm moveItemAtPath:tmpAudio toPath:finalAudio error:nil]) {
                     success = YES;
                 }
             }
@@ -374,25 +558,68 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
     }
 
     if (!success) {
-        [[NSFileManager defaultManager] removeItemAtPath:tmpAudio error:nil];
+        [fm removeItemAtPath:tmpAudio error:nil];
     }
 
+    BOOL requeued = NO;
+    BOOL batchUpdated = NO;
+    BOOL batchFinished = NO;
+    NSInteger batchSavedCount = 0;
+
     @synchronized(self) {
+        BOOL wasCancelled = [_cancelledIds containsObject:vid];
         [_activeIds removeObject:vid];
         [_progressById removeObjectForKey:vid];
         [_cancelledIds removeObject:vid];
         if (success) {
+            [_retryCountById removeObjectForKey:vid];
             for (NSInteger i = (NSInteger)[_tracks count] - 1; i >= 0; i--) {
                 if ([[[_tracks objectAtIndex:i] videoId] isEqualToString:vid]) {
                     [_tracks removeObjectAtIndex:i];
                 }
             }
             [_tracks insertObject:track atIndex:0];
+        } else if (!wasCancelled) {
+            NSInteger retries = [[_retryCountById objectForKey:vid] integerValue];
+            if (retries < 2) {
+                [_retryCountById setObject:[NSNumber numberWithInteger:retries + 1] forKey:vid];
+                [_pendingQueue addObject:track];
+                requeued = YES;
+            } else {
+                [_retryCountById removeObjectForKey:vid];
+            }
+        } else {
+            [_retryCountById removeObjectForKey:vid];
+        }
+
+        if (!requeued && [_batchIds containsObject:vid]) {
+            [_batchIds removeObject:vid];
+            _batchCompleted++;
+            batchUpdated = YES;
+            if ([_batchIds count] == 0 && _batchTotal > 0) {
+                batchFinished = YES;
+                batchSavedCount = _batchCompleted;
+            }
         }
     }
 
     if (success) [self saveIndex];
     [self performSelectorOnMainThread:@selector(postChangedOnMain) withObject:nil waitUntilDone:NO];
+    if (batchUpdated) {
+        [self dispatchBatchProgressNotification];
+    }
+    if (batchFinished) {
+        NSString *msg = [NSString stringWithFormat:@"Playlist saved (%ld tracks)", (long)batchSavedCount];
+        [self performSelectorOnMainThread:@selector(postBatchToastOnMain:) withObject:msg waitUntilDone:NO];
+        @synchronized(self) {
+            _batchTotal = 0;
+            _batchCompleted = 0;
+            [_batchTitle release]; _batchTitle = nil;
+        }
+    }
+    if (success && ![[ELLyricsClient sharedClient] cachedLyricsForVideoId:vid]) {
+        [[ELLyricsClient sharedClient] fetchLyricsForTrack:track error:nil];
+    }
     [self pumpQueue];
     [pool release];
 }
@@ -402,6 +629,8 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
     @synchronized(self) {
         [_cancelledIds addObject:videoId];
         [_progressById removeObjectForKey:videoId];
+        [_retryCountById removeObjectForKey:videoId];
+        [_batchIds removeObject:videoId];
         for (NSInteger i = (NSInteger)[_pendingQueue count] - 1; i >= 0; i--) {
             if ([[[_pendingQueue objectAtIndex:i] videoId] isEqualToString:videoId]) {
                 [_pendingQueue removeObjectAtIndex:i];
@@ -417,6 +646,7 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
     NSFileManager *fm = [NSFileManager defaultManager];
     [fm removeItemAtPath:[self localAudioPathForVideoId:videoId] error:nil];
     [fm removeItemAtPath:[self localArtPathForVideoId:videoId] error:nil];
+    [[ELLyricsClient sharedClient] deleteCachedLyricsForVideoId:videoId];
     @synchronized(self) {
         for (NSInteger i = (NSInteger)[_tracks count] - 1; i >= 0; i--) {
             if ([[[_tracks objectAtIndex:i] videoId] isEqualToString:videoId]) {

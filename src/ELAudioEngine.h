@@ -61,6 +61,11 @@ typedef enum {
     NSTimeInterval _preNextReadyTime;
     NSInteger _preNextAttemptedSessionToken;
     NSString *_preNextAttemptedVideoId;
+
+    /* Sleep timer */
+    NSTimer *_sleepTimer;
+    NSDate *_sleepFireDate;
+    NSInteger _sleepTimerRemainingSeconds;
 }
 
 + (ELAudioEngine *)sharedEngine;
@@ -77,6 +82,7 @@ typedef enum {
 @property (nonatomic, readonly) BOOL shuffleEnabled;
 @property (nonatomic, readonly) ELRepeatMode repeatMode;
 @property (nonatomic, assign) BOOL shakeToShuffleEnabled;
+@property (nonatomic, readonly) NSInteger sleepTimerRemainingSeconds;
 
 - (void)playTracks:(NSArray *)tracks startingAtIndex:(NSInteger)index;
 - (void)playTracksShuffled:(NSArray *)tracks;
@@ -95,6 +101,7 @@ typedef enum {
 - (void)cycleRepeatMode;
 - (void)handleShakeToShuffle;
 - (void)postToast:(NSString *)message;
+- (void)setSleepTimerMinutes:(NSInteger)minutes;
 
 - (void)handleRemoteControlEvent:(UIEvent *)event;
 

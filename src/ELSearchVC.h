@@ -1,7 +1,8 @@
 #import <UIKit/UIKit.h>
 
-@interface ELSearchVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UISearchBarDelegate> {
-    UISearchBar *_searchBar;
+@interface ELSearchVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate> {
+    UIView *_searchBarContainer;
+    UITextField *_searchField;
     UITableView *_tableView;
     UIActivityIndicatorView *_spinner;
     UILabel *_hintLabel;

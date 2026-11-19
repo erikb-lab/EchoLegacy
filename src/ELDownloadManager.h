@@ -3,6 +3,7 @@
 
 extern NSString *const ELDownloadsChangedNotification;
 extern NSString *const ELDownloadProgressNotification; /* userInfo: videoId, progress (NSNumber float) */
+extern NSString *const ELDownloadBatchProgressNotification; /* userInfo: title, total, completed, active */
 
 @interface ELDownloadManager : NSObject {
     NSMutableArray *_tracks;
@@ -10,11 +11,21 @@ extern NSString *const ELDownloadProgressNotification; /* userInfo: videoId, pro
     NSMutableDictionary *_progressById;
     NSMutableSet *_activeIds;
     NSMutableSet *_cancelledIds;
+    NSMutableDictionary *_retryCountById;
+    NSMutableSet *_batchIds;
+    NSString *_batchTitle;
+    NSInteger _batchTotal;
+    NSInteger _batchCompleted;
+    BOOL _isBackgrounded;
     NSString *_downloadsDir;
     UIBackgroundTaskIdentifier _dlBgTask;
 }
 
 + (ELDownloadManager *)sharedManager;
+
+@property (nonatomic, readonly) NSInteger batchTotal;
+@property (nonatomic, readonly) NSInteger batchCompleted;
+@property (nonatomic, readonly) BOOL isBatchDownloading;
 
 - (NSArray *)downloadedTracks;
 - (BOOL)isDownloaded:(NSString *)videoId;
@@ -29,6 +40,8 @@ extern NSString *const ELDownloadProgressNotification; /* userInfo: videoId, pro
 
 - (void)downloadTrack:(ELTrack *)track;
 - (void)downloadTracks:(NSArray *)tracks;
+- (void)downloadPlaylistTracks:(NSArray *)tracks title:(NSString *)title;
+- (void)cancelBatchDownload;
 - (void)cancelDownloadForVideoId:(NSString *)videoId;
 - (void)deleteDownloadForVideoId:(NSString *)videoId;
 

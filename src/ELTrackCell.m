@@ -13,34 +13,37 @@
     self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
     if (self) {
         UIColor *bg = [ELTheme backgroundColor];
+        UIColor *cardBg = [ELTheme surfaceColor];
         self.backgroundColor = bg;
         self.opaque = YES;
         self.contentView.backgroundColor = bg;
         self.contentView.opaque = YES;
+        self.selectionStyle = UITableViewCellSelectionStyleNone;
 
-        UIView *selBg = [[[UIView alloc] initWithFrame:CGRectZero] autorelease];
-        selBg.backgroundColor = [ELTheme surfaceHighlightColor];
-        selBg.opaque = YES;
-        self.selectedBackgroundView = selBg;
+        /* Stretchable rounded card surface: zero offscreen cornerRadius FBOs */
+        _cardBgView = [[UIImageView alloc] initWithFrame:CGRectMake(10.0f, 3.0f, 300.0f, 56.0f)];
+        _cardBgView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        _cardBgView.image = [ELTheme stretchableCardImageWithColor:cardBg];
+        [self.contentView addSubview:_cardBgView];
 
         /* Pre-rendered 46x46 rounded thumbnail: zero cornerRadius+masksToBounds offscreen FBO stalls */
-        _artView = [[UIImageView alloc] initWithFrame:CGRectMake(12.0f, 8.0f, 46.0f, 46.0f)];
+        _artView = [[UIImageView alloc] initWithFrame:CGRectMake(18.0f, 8.0f, 46.0f, 46.0f)];
         _artView.contentMode = UIViewContentModeScaleToFill;
         _artView.backgroundColor = [UIColor clearColor];
         _artView.image = [ELTheme roundedPlaceholderArtSize:46.0f radius:6.0f];
         [self.contentView addSubview:_artView];
 
-        /* Opaque labels matching cell background eliminate MBX Lite alpha-blending overdraw */
-        _titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(68.0f, 11.0f, 206.0f, 20.0f)];
-        _titleLabel.backgroundColor = bg;
+        /* Opaque labels matching card surface eliminate MBX Lite alpha-blending overdraw */
+        _titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(74.0f, 12.0f, 194.0f, 19.0f)];
+        _titleLabel.backgroundColor = cardBg;
         _titleLabel.opaque = YES;
         _titleLabel.font = [UIFont boldSystemFontOfSize:14.0f];
         _titleLabel.textColor = [ELTheme textPrimaryColor];
         _titleLabel.lineBreakMode = UILineBreakModeTailTruncation;
         [self.contentView addSubview:_titleLabel];
 
-        _subtitleLabel = [[UILabel alloc] initWithFrame:CGRectMake(68.0f, 32.0f, 206.0f, 17.0f)];
-        _subtitleLabel.backgroundColor = bg;
+        _subtitleLabel = [[UILabel alloc] initWithFrame:CGRectMake(74.0f, 32.0f, 194.0f, 17.0f)];
+        _subtitleLabel.backgroundColor = cardBg;
         _subtitleLabel.opaque = YES;
         _subtitleLabel.font = [UIFont systemFontOfSize:12.0f];
         _subtitleLabel.textColor = [ELTheme textSecondaryColor];
@@ -48,8 +51,8 @@
         [self.contentView addSubview:_subtitleLabel];
 
         _downloadBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-        _downloadBtn.frame = CGRectMake(278.0f, 12.0f, 36.0f, 38.0f);
-        _downloadBtn.backgroundColor = bg;
+        _downloadBtn.frame = CGRectMake(270.0f, 12.0f, 34.0f, 38.0f);
+        _downloadBtn.backgroundColor = cardBg;
         _downloadBtn.opaque = YES;
         _downloadBtn.titleLabel.font = [UIFont boldSystemFontOfSize:10.0f];
         [_downloadBtn addTarget:self action:@selector(onDownloadTapped) forControlEvents:UIControlEventTouchUpInside];
@@ -59,6 +62,7 @@
 }
 
 - (void)dealloc {
+    [_cardBgView release];
     [_artView release];
     [_titleLabel release];
     [_subtitleLabel release];
@@ -70,10 +74,11 @@
 }
 
 - (void)applyOpaqueBackgroundActive:(BOOL)active {
-    UIColor *bg = active ? [ELTheme surfaceHighlightColor] : [ELTheme backgroundColor];
-    _titleLabel.backgroundColor = bg;
-    _subtitleLabel.backgroundColor = bg;
-    _downloadBtn.backgroundColor = bg;
+    UIColor *cardBg = active ? [ELTheme surfaceHighlightColor] : [ELTheme surfaceColor];
+    _cardBgView.image = [ELTheme stretchableCardImageWithColor:cardBg];
+    _titleLabel.backgroundColor = cardBg;
+    _subtitleLabel.backgroundColor = cardBg;
+    _downloadBtn.backgroundColor = cardBg;
 }
 
 - (void)setHighlighted:(BOOL)highlighted animated:(BOOL)animated {

@@ -34,7 +34,7 @@ SSH_CMD=(env LD_LIBRARY_PATH="$LIK_LIB" "$LIK_BIN/sshpass" -p "$PASS" "$LIK_BIN/
 echo "[3/5] Uploading EchoLegacy.app to /Applications/EchoLegacy.app..."
 if ! tar -C "${DIR}/build" -cf - EchoLegacy.app | \
   "${SSH_CMD[@]}" \
-    "killall EchoLegacy 2>/dev/null || true; rm -rf /Applications/EchoLegacy.app && tar -C /Applications -xf - && chown -R root:wheel /Applications/EchoLegacy.app && chmod 755 /Applications/EchoLegacy.app/EchoLegacy"; then
+    "killall EchoLegacy 2>/dev/null || true; rm -rf /Applications/EchoLegacy.app && tar -C /Applications -xf - && chown -R mobile:wheel /Applications/EchoLegacy.app && chmod 755 /Applications/EchoLegacy.app/EchoLegacy"; then
   echo "[!] SSH upload failed. Verify OpenSSH is installed and IPOD_PASS is correct (default: alpine)."
   exit 1
 fi

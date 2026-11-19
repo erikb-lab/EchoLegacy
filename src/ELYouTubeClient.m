@@ -256,12 +256,126 @@ static ELTrack *el_parse_tile_video(NSDictionary *tile) {
     return track;
 }
 
+static ELTrack *el_parse_music_two_row_item(NSDictionary *renderer) {
+    if (![renderer isKindOfClass:[NSDictionary class]]) return nil;
+
+    NSDictionary *nav = [ELJSON dict:renderer forKey:@"navigationEndpoint"];
+    NSDictionary *watch = [ELJSON dict:nav forKey:@"watchEndpoint"];
+    NSString *videoId = [ELJSON string:watch forKey:@"videoId"];
+
+    if ([videoId length] == 0) {
+        NSDictionary *ov = [ELJSON dict:renderer forKey:@"thumbnailOverlay"];
+        NSDictionary *mtor = [ELJSON dict:ov forKey:@"musicItemThumbnailOverlayRenderer"];
+        NSDictionary *content = [ELJSON dict:mtor forKey:@"content"];
+        NSDictionary *playBtn = [ELJSON dict:content forKey:@"musicPlayButtonRenderer"];
+        NSDictionary *pNav = [ELJSON dict:playBtn forKey:@"playNavigationEndpoint"];
+        NSDictionary *pWatch = [ELJSON dict:pNav forKey:@"watchEndpoint"];
+        videoId = [ELJSON string:pWatch forKey:@"videoId"];
+    }
+    if ([videoId length] == 0) return nil;
+
+    NSString *title = el_text_from_yt_obj([renderer objectForKey:@"title"]);
+    if ([title length] == 0) return nil;
+
+    NSMutableArray *artists = [NSMutableArray array];
+    NSArray *subRuns = [ELJSON array:[ELJSON dict:renderer forKey:@"subtitle"] forKey:@"runs"];
+    for (id runObj in subRuns) {
+        if (![runObj isKindOfClass:[NSDictionary class]]) continue;
+        NSString *txt = [[ELJSON string:runObj forKey:@"text"]
+                         stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if ([txt length] == 0 || [txt isEqualToString:@"\u2022"] || [txt isEqualToString:@"&"] || [txt isEqualToString:@","]) continue;
+        if ([txt isEqualToString:@"Song"] || [txt isEqualToString:@"Video"]) continue;
+        if ([txt rangeOfString:@"views" options:NSCaseInsensitiveSearch].location != NSNotFound) continue;
+        if (el_looks_like_duration(txt)) continue;
+        [artists addObject:txt];
+        if ([artists count] >= 2) break;
+    }
+    NSString *artist = ([artists count] > 0) ? [artists componentsJoinedByString:@", "] : @"YouTube Music";
+
+    NSDictionary *thumbRenderer = [ELJSON dict:[ELJSON dict:renderer forKey:@"thumbnailRenderer"]
+                                        forKey:@"musicThumbnailRenderer"];
+    NSString *rawThumb = el_extract_best_thumb(thumbRenderer);
+
+    ELTrack *track = [[[ELTrack alloc] init] autorelease];
+    track.videoId = videoId;
+    track.title = title;
+    track.artist = artist;
+    track.album = @"";
+    track.durationText = @"";
+    track.durationSeconds = 0;
+    track.thumbURL = el_resize_google_thumb(rawThumb, 120);
+    track.artURL = el_resize_google_thumb(rawThumb, 300);
+    return track;
+}
+
+static ELTrack *el_parse_playlist_panel_video(NSDictionary *renderer) {
+    if (![renderer isKindOfClass:[NSDictionary class]]) return nil;
+
+    NSString *videoId = [ELJSON string:renderer forKey:@"videoId"];
+    if ([videoId length] == 0) {
+        NSDictionary *nav = [ELJSON dict:renderer forKey:@"navigationEndpoint"];
+        NSDictionary *watch = [ELJSON dict:nav forKey:@"watchEndpoint"];
+        videoId = [ELJSON string:watch forKey:@"videoId"];
+    }
+    if ([videoId length] == 0) return nil;
+
+    NSString *title = el_text_from_yt_obj([renderer objectForKey:@"title"]);
+    if ([title length] == 0) return nil;
+
+    NSDictionary *byline = [ELJSON dict:renderer forKey:@"shortBylineText"];
+    if (!byline) byline = [ELJSON dict:renderer forKey:@"longBylineText"];
+    NSMutableArray *artists = [NSMutableArray array];
+    for (id runObj in [ELJSON array:byline forKey:@"runs"]) {
+        if (![runObj isKindOfClass:[NSDictionary class]]) continue;
+        NSString *txt = [[ELJSON string:runObj forKey:@"text"]
+                         stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if ([txt length] == 0 || [txt isEqualToString:@"\u2022"] || [txt isEqualToString:@"&"] || [txt isEqualToString:@","]) continue;
+        if ([txt rangeOfString:@"views" options:NSCaseInsensitiveSearch].location != NSNotFound) break;
+        if (el_looks_like_duration(txt)) continue;
+        [artists addObject:txt];
+        break; /* First artist/channel run is cleanest in radio panel */
+    }
+    NSString *artist = ([artists count] > 0) ? [artists componentsJoinedByString:@", "] : @"YouTube Music";
+
+    NSString *duration = el_text_from_yt_obj([renderer objectForKey:@"lengthText"]);
+    NSString *rawThumb = el_extract_best_thumb(renderer);
+
+    ELTrack *track = [[[ELTrack alloc] init] autorelease];
+    track.videoId = videoId;
+    track.title = title;
+    track.artist = artist;
+    track.album = @"";
+    track.durationText = duration;
+    track.durationSeconds = el_parse_duration_text(duration);
+    track.thumbURL = el_resize_google_thumb(rawThumb, 120);
+    track.artURL = el_resize_google_thumb(rawThumb, 300);
+    return track;
+}
+
 static void el_collect_tracks_recursive(id node, NSMutableArray *outTracks, NSMutableSet *seenIds) {
     if ([node isKindOfClass:[NSDictionary class]]) {
         NSDictionary *dict = (NSDictionary *)node;
         NSDictionary *renderer = [ELJSON dict:dict forKey:@"musicResponsiveListItemRenderer"];
         if (renderer) {
             ELTrack *t = el_parse_music_list_item(renderer);
+            if (t && ![seenIds containsObject:t.videoId]) {
+                [seenIds addObject:t.videoId];
+                [outTracks addObject:t];
+            }
+            return;
+        }
+        NSDictionary *twoRow = [ELJSON dict:dict forKey:@"musicTwoRowItemRenderer"];
+        if (twoRow) {
+            ELTrack *t = el_parse_music_two_row_item(twoRow);
+            if (t && ![seenIds containsObject:t.videoId]) {
+                [seenIds addObject:t.videoId];
+                [outTracks addObject:t];
+            }
+            return;
+        }
+        NSDictionary *panel = [ELJSON dict:dict forKey:@"playlistPanelVideoRenderer"];
+        if (panel) {
+            ELTrack *t = el_parse_playlist_panel_video(panel);
             if (t && ![seenIds containsObject:t.videoId]) {
                 [seenIds addObject:t.videoId];
                 [outTracks addObject:t];
@@ -533,6 +647,91 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
     NSMutableArray *tracks = [NSMutableArray array];
     NSMutableSet *seen = [NSMutableSet set];
     el_collect_tracks_recursive(json, tracks, seen);
+    return tracks;
+}
+
+- (NSArray *)fetchHomeTracksForMood:(NSString *)mood error:(NSString **)outError {
+    NSString *trimmed = mood ? [mood stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] : @"";
+    if ([trimmed length] > 0 && ![trimmed isEqualToString:@"All"]) {
+        NSString *query = [NSString stringWithFormat:@"%@ music", trimmed];
+        return [self searchSongs:query error:outError];
+    }
+
+    NSDictionary *body = [NSDictionary dictionaryWithObjectsAndKeys:
+                          [self webRemixContext], @"context",
+                          @"FEmusic_home", @"browseId",
+                          nil];
+    BOOL signedIn = [[ELAuthManager sharedManager] isSignedIn];
+    NSString *err = nil;
+    NSDictionary *json = [self postYTMusicEndpoint:@"browse" body:body authenticated:signedIn error:&err];
+    if (!json && signedIn) {
+        err = nil;
+        json = [self postYTMusicEndpoint:@"browse" body:body authenticated:NO error:&err];
+    }
+
+    NSMutableArray *tracks = [NSMutableArray array];
+    if (json) {
+        NSMutableSet *seen = [NSMutableSet set];
+        el_collect_tracks_recursive(json, tracks, seen);
+    }
+    if ([tracks count] == 0) {
+        NSString *fbErr = nil;
+        NSArray *fallback = [self searchSongs:@"top hits music" error:&fbErr];
+        if ([fallback count] > 0) return fallback;
+        if (outError) *outError = err ? err : fbErr;
+        return nil;
+    }
+    return tracks;
+}
+
+- (NSArray *)fetchRadioTracksForVideoId:(NSString *)videoId error:(NSString **)outError {
+    if ([videoId length] == 0) {
+        if (outError) *outError = @"Invalid videoId";
+        return nil;
+    }
+
+    NSDictionary *body = [NSDictionary dictionaryWithObjectsAndKeys:
+                          [self webRemixContext], @"context",
+                          videoId, @"videoId",
+                          [NSString stringWithFormat:@"RDAMVM%@", videoId], @"playlistId",
+                          [NSNumber numberWithBool:YES], @"isAudioOnly",
+                          nil];
+    BOOL signedIn = [[ELAuthManager sharedManager] isSignedIn];
+    NSString *err = nil;
+    NSDictionary *json = [self postYTMusicEndpoint:@"next" body:body authenticated:signedIn error:&err];
+    if (!json && signedIn) {
+        err = nil;
+        json = [self postYTMusicEndpoint:@"next" body:body authenticated:NO error:&err];
+    }
+
+    NSMutableArray *tracks = [NSMutableArray array];
+    if (json) {
+        NSMutableSet *seen = [NSMutableSet set];
+        el_collect_tracks_recursive(json, tracks, seen);
+    }
+
+    if ([tracks count] == 0) {
+        /* Fallback to searching by cached liked track metadata if available */
+        NSString *query = nil;
+        @synchronized(self) {
+            for (ELTrack *t in _cachedLikedSongs) {
+                if ([t.videoId isEqualToString:videoId]) {
+                    if ([t.artist length] > 0 && [t.title length] > 0) {
+                        query = [NSString stringWithFormat:@"%@ %@ mix", t.artist, t.title];
+                    } else if ([t.title length] > 0) {
+                        query = t.title;
+                    }
+                    break;
+                }
+            }
+        }
+        if ([query length] > 0) {
+            NSArray *fb = [self searchSongs:query error:outError];
+            if ([fb count] > 0) return fb;
+        }
+        if (outError && err) *outError = err;
+        return nil;
+    }
     return tracks;
 }
 

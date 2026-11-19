@@ -14,6 +14,8 @@
     UIButton *_emptyActionBtn;
     NSArray *_playlists;
     NSArray *_likedSongs;
+    NSMutableArray *_filterButtons;
+    NSInteger _filterMode;
     BOOL _syncing;
 }
 

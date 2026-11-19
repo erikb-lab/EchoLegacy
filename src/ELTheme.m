@@ -170,6 +170,21 @@ static CGFloat el_clampf(CGFloat v, CGFloat lo, CGFloat hi) {
     return c;
 }
 
++ (UIColor *)dominantBackdropColorFromImage:(UIImage *)image cacheKey:(NSString *)cacheKey {
+    static NSMutableDictionary *g_backdrop_cache = nil;
+    if ([cacheKey length] > 0) {
+        if (!g_backdrop_cache) g_backdrop_cache = [[NSMutableDictionary alloc] init];
+        UIColor *hit = [g_backdrop_cache objectForKey:cacheKey];
+        if (hit) return hit;
+    }
+    UIColor *col = [self dominantBackdropColorFromImage:image];
+    if (col && [cacheKey length] > 0 && image && image != [self placeholderArtImage]) {
+        if ([g_backdrop_cache count] > 32) [g_backdrop_cache removeAllObjects];
+        [g_backdrop_cache setObject:col forKey:cacheKey];
+    }
+    return col;
+}
+
 + (UIColor *)dominantBackdropColorFromImage:(UIImage *)image {
     if (!image || image == [self placeholderArtImage]) {
         return [self defaultBackdropColor];
@@ -334,6 +349,7 @@ static CGFloat el_clampf(CGFloat v, CGFloat lo, CGFloat hi) {
 + (void)styleTableView:(UITableView *)tableView {
     tableView.backgroundColor = [self backgroundColor];
     tableView.separatorColor = [self separatorColor];
+    tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
     tableView.indicatorStyle = UIScrollViewIndicatorStyleWhite;
 }
 
@@ -389,6 +405,35 @@ static CGFloat el_clampf(CGFloat v, CGFloat lo, CGFloat hi) {
     UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
     UIGraphicsEndImageContext();
     return el_store_icon(@"placeholder_art", img);
+}
+
++ (UIImage *)tabIconHome {
+    UIImage *c = el_cached_icon(@"tab_home");
+    if (c) return c;
+    CGSize sz = CGSizeMake(24.0f, 24.0f);
+    UIGraphicsBeginImageContext(sz);
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    [[UIColor whiteColor] setStroke];
+    CGContextSetLineWidth(ctx, 2.0f);
+    CGContextSetLineCap(ctx, kCGLineCapRound);
+    CGContextSetLineJoin(ctx, kCGLineJoinRound);
+    /* Roof + house body */
+    CGContextBeginPath(ctx);
+    CGContextMoveToPoint(ctx, 3.5f, 11.0f);
+    CGContextAddLineToPoint(ctx, 12.0f, 4.0f);
+    CGContextAddLineToPoint(ctx, 20.5f, 11.0f);
+    CGContextMoveToPoint(ctx, 5.5f, 10.0f);
+    CGContextAddLineToPoint(ctx, 5.5f, 20.0f);
+    CGContextAddLineToPoint(ctx, 10.0f, 20.0f);
+    CGContextAddLineToPoint(ctx, 10.0f, 14.5f);
+    CGContextAddLineToPoint(ctx, 14.0f, 14.5f);
+    CGContextAddLineToPoint(ctx, 14.0f, 20.0f);
+    CGContextAddLineToPoint(ctx, 18.5f, 20.0f);
+    CGContextAddLineToPoint(ctx, 18.5f, 10.0f);
+    CGContextStrokePath(ctx);
+    UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return el_store_icon(@"tab_home", img);
 }
 
 + (UIImage *)tabIconLibrary {
@@ -846,6 +891,81 @@ static CGFloat el_clampf(CGFloat v, CGFloat lo, CGFloat hi) {
     CGContextFillPath(ctx);
     NSInteger cap = (NSInteger)(height * 0.5f);
     UIImage *img = [UIGraphicsGetImageFromCurrentImageContext() stretchableImageWithLeftCapWidth:cap topCapHeight:0];
+    UIGraphicsEndImageContext();
+    return el_store_icon(k, img);
+}
+
++ (UIImage *)stretchableCardImageWithColor:(UIColor *)color {
+    NSString *k = el_icon_key(@"scard", 10.0f, color);
+    UIImage *c = el_cached_icon(k);
+    if (c) return c;
+    CGFloat dim = 24.0f;
+    CGFloat radius = 10.0f;
+    UIGraphicsBeginImageContext(CGSizeMake(dim, dim));
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    [color setFill];
+    el_add_rounded_rect_path(ctx, CGRectMake(0.0f, 0.0f, dim, dim), radius);
+    CGContextFillPath(ctx);
+    UIImage *img = [UIGraphicsGetImageFromCurrentImageContext() stretchableImageWithLeftCapWidth:11 topCapHeight:11];
+    UIGraphicsEndImageContext();
+    return el_store_icon(k, img);
+}
+
++ (UIImage *)iconSearchSize:(CGFloat)size color:(UIColor *)color {
+    NSString *k = el_icon_key(@"search", size, color);
+    UIImage *c = el_cached_icon(k);
+    if (c) return c;
+    UIGraphicsBeginImageContext(CGSizeMake(size, size));
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    [color setStroke];
+    CGContextSetLineWidth(ctx, size * 0.11f);
+    CGContextSetLineCap(ctx, kCGLineCapRound);
+    CGContextStrokeEllipseInRect(ctx, CGRectMake(size * 0.16f, size * 0.16f, size * 0.48f, size * 0.48f));
+    CGContextMoveToPoint(ctx, size * 0.59f, size * 0.59f);
+    CGContextAddLineToPoint(ctx, size * 0.84f, size * 0.84f);
+    CGContextStrokePath(ctx);
+    UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return el_store_icon(k, img);
+}
+
++ (UIImage *)iconMoreSize:(CGFloat)size color:(UIColor *)color {
+    NSString *k = el_icon_key(@"more", size, color);
+    UIImage *c = el_cached_icon(k);
+    if (c) return c;
+    UIGraphicsBeginImageContext(CGSizeMake(size, size));
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    [color setFill];
+    CGFloat d = size * 0.16f;
+    CGFloat cy = (size - d) * 0.5f;
+    CGContextFillEllipseInRect(ctx, CGRectMake(size * 0.18f - d * 0.5f, cy, d, d));
+    CGContextFillEllipseInRect(ctx, CGRectMake(size * 0.50f - d * 0.5f, cy, d, d));
+    CGContextFillEllipseInRect(ctx, CGRectMake(size * 0.82f - d * 0.5f, cy, d, d));
+    UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return el_store_icon(k, img);
+}
+
++ (UIImage *)iconLyricsSize:(CGFloat)size color:(UIColor *)color {
+    NSString *k = el_icon_key(@"lyrics", size, color);
+    UIImage *c = el_cached_icon(k);
+    if (c) return c;
+    UIGraphicsBeginImageContext(CGSizeMake(size, size));
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    [color setStroke];
+    CGContextSetLineWidth(ctx, size * 0.10f);
+    CGContextSetLineCap(ctx, kCGLineCapRound);
+    CGContextSetLineJoin(ctx, kCGLineJoinRound);
+    el_add_rounded_rect_path(ctx, CGRectMake(size * 0.14f, size * 0.18f, size * 0.72f, size * 0.64f), size * 0.14f);
+    CGContextStrokePath(ctx);
+    CGContextMoveToPoint(ctx, size * 0.30f, size * 0.38f);
+    CGContextAddLineToPoint(ctx, size * 0.70f, size * 0.38f);
+    CGContextMoveToPoint(ctx, size * 0.30f, size * 0.52f);
+    CGContextAddLineToPoint(ctx, size * 0.70f, size * 0.52f);
+    CGContextMoveToPoint(ctx, size * 0.30f, size * 0.66f);
+    CGContextAddLineToPoint(ctx, size * 0.54f, size * 0.66f);
+    CGContextStrokePath(ctx);
+    UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
     UIGraphicsEndImageContext();
     return el_store_icon(k, img);
 }

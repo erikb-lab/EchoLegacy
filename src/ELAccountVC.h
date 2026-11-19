@@ -1,6 +1,8 @@
 #import <UIKit/UIKit.h>
 
-@interface ELAccountVC : UIViewController {
+@class ELUpdateInfo;
+
+@interface ELAccountVC : UIViewController <UIAlertViewDelegate> {
     UIScrollView *_scrollView;
     UIView *_statusDot;
     UILabel *_accountTitleLabel;
@@ -21,6 +23,15 @@
     UISwitch *_shakeSwitch;
     UILabel *_cacheLabel;
     UIButton *_clearCacheBtn;
+
+    /* GitHub OTA Update card */
+    UIView *_updateCard;
+    UILabel *_updateStatusLabel;
+    UIButton *_updateBtn;
+    ELUpdateInfo *_pendingUpdate;
+    BOOL _checkingUpdate;
+    BOOL _installingUpdate;
+    BOOL _relaunchReady;
 
     NSInteger _pollSession;
     BOOL _syncing;

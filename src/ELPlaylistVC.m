@@ -17,13 +17,23 @@
     return self;
 }
 
-- (void)dealloc {
+- (void)releaseViewOutlets {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [_tableView release]; _tableView = nil;
+    [_spinner release]; _spinner = nil;
+    [_statusLabel release]; _statusLabel = nil;
+    [_downloadPlaylistBtn release]; _downloadPlaylistBtn = nil;
+}
+
+- (void)viewDidUnload {
+    [self releaseViewOutlets];
+    [super viewDidUnload];
+}
+
+- (void)dealloc {
+    [self releaseViewOutlets];
     [_playlist release];
     [_tracks release];
-    [_tableView release];
-    [_spinner release];
-    [_statusLabel release];
     [super dealloc];
 }
 
@@ -58,6 +68,7 @@
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reloadCells) name:ELPlayerStateChangedNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onDownloadsChanged) name:ELDownloadsChangedNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onDownloadProgress:) name:ELDownloadProgressNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onBatchProgress) name:ELDownloadBatchProgressNotification object:nil];
 
     [_spinner startAnimating];
     [NSThread detachNewThreadSelector:@selector(loadPlaylistWorker) toTarget:self withObject:nil];
@@ -79,8 +90,46 @@
     }
 }
 
+- (BOOL)allTracksDownloaded {
+    if ([_tracks count] == 0) return NO;
+    ELDownloadManager *dm = [ELDownloadManager sharedManager];
+    for (ELTrack *t in _tracks) {
+        if (![dm isDownloaded:t.videoId]) return NO;
+    }
+    return YES;
+}
+
+- (void)updateDownloadButtonState {
+    if (!_downloadPlaylistBtn) return;
+    ELDownloadManager *dm = [ELDownloadManager sharedManager];
+    if (dm.isBatchDownloading && dm.batchTotal > 0) {
+        NSString *lbl = [NSString stringWithFormat:@"Cancel (%ld/%ld)", (long)dm.batchCompleted, (long)dm.batchTotal];
+        [_downloadPlaylistBtn setTitle:lbl forState:UIControlStateNormal];
+        UIImage *bg = [ELTheme roundedRectImageWithSize:_downloadPlaylistBtn.frame.size
+                                                  radius:18.0f
+                                               fillColor:[ELTheme accentColor]
+                                             borderColor:nil];
+        [_downloadPlaylistBtn setBackgroundImage:bg forState:UIControlStateNormal];
+    } else if ([self allTracksDownloaded]) {
+        [_downloadPlaylistBtn setTitle:@"Saved Offline" forState:UIControlStateNormal];
+        UIImage *bg = [ELTheme roundedRectImageWithSize:_downloadPlaylistBtn.frame.size
+                                                  radius:18.0f
+                                               fillColor:[ELTheme successColor]
+                                             borderColor:nil];
+        [_downloadPlaylistBtn setBackgroundImage:bg forState:UIControlStateNormal];
+    } else {
+        [_downloadPlaylistBtn setTitle:@"Download Playlist" forState:UIControlStateNormal];
+        UIImage *bg = [ELTheme roundedRectImageWithSize:_downloadPlaylistBtn.frame.size
+                                                  radius:18.0f
+                                               fillColor:[ELTheme surfaceHighlightColor]
+                                             borderColor:nil];
+        [_downloadPlaylistBtn setBackgroundImage:bg forState:UIControlStateNormal];
+    }
+}
+
 - (void)onDownloadsChanged {
     [self refreshVisibleCellsForVideoId:nil];
+    [self updateDownloadButtonState];
 }
 
 - (void)onDownloadProgress:(NSNotification *)note {
@@ -88,8 +137,13 @@
     [self refreshVisibleCellsForVideoId:vid];
 }
 
+- (void)onBatchProgress {
+    [self updateDownloadButtonState];
+}
+
 - (void)loadPlaylistWorker {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    [NSThread setThreadPriority:0.25];
     NSString *err = nil;
     NSArray *list = [[ELYouTubeClient sharedClient] fetchTracksForPlaylistId:_playlist.playlistId error:&err];
     NSMutableDictionary *res = [NSMutableDictionary dictionary];
@@ -116,21 +170,24 @@
 
     UIButton *playBtn = [ELTheme pillButtonWithTitle:@"Play"
                                                color:[ELTheme accentColor]
-                                               frame:CGRectMake(12.0f, 30.0f, 92.0f, 36.0f)];
+                                               frame:CGRectMake(12.0f, 30.0f, 76.0f, 36.0f)];
     [playBtn addTarget:self action:@selector(onPlayAll) forControlEvents:UIControlEventTouchUpInside];
     [hdr addSubview:playBtn];
 
     UIButton *shufBtn = [ELTheme pillButtonWithTitle:@"Shuffle"
                                                color:[ELTheme surfaceHighlightColor]
-                                               frame:CGRectMake(112.0f, 30.0f, 92.0f, 36.0f)];
+                                               frame:CGRectMake(94.0f, 30.0f, 76.0f, 36.0f)];
     [shufBtn addTarget:self action:@selector(onShuffleAll) forControlEvents:UIControlEventTouchUpInside];
     [hdr addSubview:shufBtn];
 
-    UIButton *dlBtn = [ELTheme pillButtonWithTitle:@"Save All"
-                                             color:[ELTheme surfaceHighlightColor]
-                                             frame:CGRectMake(212.0f, 30.0f, 96.0f, 36.0f)];
-    [dlBtn addTarget:self action:@selector(onDownloadAll) forControlEvents:UIControlEventTouchUpInside];
-    [hdr addSubview:dlBtn];
+    [_downloadPlaylistBtn release];
+    _downloadPlaylistBtn = [[ELTheme pillButtonWithTitle:@"Download Playlist"
+                                                  color:[ELTheme surfaceHighlightColor]
+                                                  frame:CGRectMake(176.0f, 30.0f, 132.0f, 36.0f)] retain];
+    _downloadPlaylistBtn.titleLabel.font = [UIFont boldSystemFontOfSize:11.5f];
+    [_downloadPlaylistBtn addTarget:self action:@selector(onDownloadAll) forControlEvents:UIControlEventTouchUpInside];
+    [hdr addSubview:_downloadPlaylistBtn];
+    [self updateDownloadButtonState];
 
     return hdr;
 }
@@ -144,10 +201,14 @@
 }
 
 - (void)onDownloadAll {
-    if ([_tracks count] > 0) {
-        [[ELDownloadManager sharedManager] downloadTracks:_tracks];
-        [[ELAudioEngine sharedEngine] postToast:[NSString stringWithFormat:@"Queued %lu tracks", (unsigned long)[_tracks count]]];
+    ELDownloadManager *dm = [ELDownloadManager sharedManager];
+    if (dm.isBatchDownloading) {
+        [dm cancelBatchDownload];
+        [[ELAudioEngine sharedEngine] postToast:@"Download cancelled"];
+    } else if ([_tracks count] > 0 && ![self allTracksDownloaded]) {
+        [dm downloadPlaylistTracks:_tracks title:_playlist.title];
     }
+    [self updateDownloadButtonState];
 }
 
 - (void)onPlaylistLoaded:(NSDictionary *)res {

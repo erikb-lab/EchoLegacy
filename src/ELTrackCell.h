@@ -2,6 +2,7 @@
 #import "ELTrack.h"
 
 @interface ELTrackCell : UITableViewCell {
+    UIImageView *_cardBgView;
     UIImageView *_artView;
     UILabel *_titleLabel;
     UILabel *_subtitleLabel;

@@ -2,6 +2,7 @@
 #import "ELAccountVC.h"
 #import "ELAudioEngine.h"
 #import "ELDownloadsVC.h"
+#import "ELHomeVC.h"
 #import "ELImageCache.h"
 #import "ELLibraryVC.h"
 #import "ELNowPlayingVC.h"
@@ -42,23 +43,26 @@
     _window = [[ELWindow alloc] initWithFrame:bounds];
     _window.backgroundColor = [ELTheme backgroundColor];
 
-    ELLibraryVC *libVC = [[[ELLibraryVC alloc] init] autorelease];
+    ELHomeVC *homeVC = [[[ELHomeVC alloc] init] autorelease];
     ELSearchVC *searchVC = [[[ELSearchVC alloc] init] autorelease];
+    ELLibraryVC *libVC = [[[ELLibraryVC alloc] init] autorelease];
     ELDownloadsVC *dlVC = [[[ELDownloadsVC alloc] init] autorelease];
     ELAccountVC *acctVC = [[[ELAccountVC alloc] init] autorelease];
 
-    UINavigationController *libNav = [[[UINavigationController alloc] initWithRootViewController:libVC] autorelease];
+    UINavigationController *homeNav = [[[UINavigationController alloc] initWithRootViewController:homeVC] autorelease];
     UINavigationController *searchNav = [[[UINavigationController alloc] initWithRootViewController:searchVC] autorelease];
+    UINavigationController *libNav = [[[UINavigationController alloc] initWithRootViewController:libVC] autorelease];
     UINavigationController *dlNav = [[[UINavigationController alloc] initWithRootViewController:dlVC] autorelease];
     UINavigationController *acctNav = [[[UINavigationController alloc] initWithRootViewController:acctVC] autorelease];
 
-    [ELTheme styleNavBar:libNav.navigationBar];
+    [ELTheme styleNavBar:homeNav.navigationBar];
     [ELTheme styleNavBar:searchNav.navigationBar];
+    [ELTheme styleNavBar:libNav.navigationBar];
     [ELTheme styleNavBar:dlNav.navigationBar];
     [ELTheme styleNavBar:acctNav.navigationBar];
 
     _tabBarController = [[UITabBarController alloc] init];
-    _tabBarController.viewControllers = [NSArray arrayWithObjects:libNav, searchNav, dlNav, acctNav, nil];
+    _tabBarController.viewControllers = [NSArray arrayWithObjects:homeNav, searchNav, libNav, dlNav, acctNav, nil];
     _tabBarController.selectedIndex = 0;
 
     [_window addSubview:_tabBarController.view];

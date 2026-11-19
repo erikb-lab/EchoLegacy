@@ -14,6 +14,7 @@
 
 /* Dynamic album-art dominant backdrop sampling & color shading (iOS 4.1 CG-only, <1ms) */
 + (UIColor *)dominantBackdropColorFromImage:(UIImage *)image;
++ (UIColor *)dominantBackdropColorFromImage:(UIImage *)image cacheKey:(NSString *)cacheKey;
 + (UIColor *)darkerShadeOfColor:(UIColor *)color factor:(CGFloat)factor;
 + (UIColor *)colorWithColor:(UIColor *)color alpha:(CGFloat)alpha;
 
@@ -23,6 +24,7 @@
 
 /* Cached procedural CoreGraphics icons (zero re-allocation while scrolling!) */
 + (UIImage *)placeholderArtImage;
++ (UIImage *)tabIconHome;
 + (UIImage *)tabIconLibrary;
 + (UIImage *)tabIconSearch;
 + (UIImage *)tabIconDownloads;
@@ -41,12 +43,16 @@
 + (UIImage *)iconHeartOutlineSize:(CGFloat)size color:(UIColor *)color;
 + (UIImage *)iconHeartFilledSize:(CGFloat)size color:(UIColor *)color;
 + (UIImage *)iconSyncSize:(CGFloat)size color:(UIColor *)color;
++ (UIImage *)iconSearchSize:(CGFloat)size color:(UIColor *)color;
++ (UIImage *)iconMoreSize:(CGFloat)size color:(UIColor *)color;
++ (UIImage *)iconLyricsSize:(CGFloat)size color:(UIColor *)color;
 + (UIImage *)sliderTrackImageWithColor:(UIColor *)color;
 + (UIImage *)sliderThumbImage;
 
 /* Pre-rendered MBX Lite-friendly surfaces & rounded thumbnails (zero offscreen FBO clipping!) */
 + (UIImage *)circlePillImageWithSize:(CGFloat)size color:(UIColor *)color;
 + (UIImage *)stretchablePillImageWithHeight:(CGFloat)height color:(UIColor *)color;
++ (UIImage *)stretchableCardImageWithColor:(UIColor *)color;
 + (UIImage *)roundedRectImageWithSize:(CGSize)size radius:(CGFloat)radius fillColor:(UIColor *)fillColor borderColor:(UIColor *)borderColor;
 + (UIImage *)roundedPlaceholderArtSize:(CGFloat)size radius:(CGFloat)radius;
 + (UIImage *)roundedThumbnailFromImage:(UIImage *)image size:(CGFloat)size radius:(CGFloat)radius cacheKey:(NSString *)cacheKey;

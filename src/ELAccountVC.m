@@ -3,6 +3,7 @@
 #import "ELAuthManager.h"
 #import "ELImageCache.h"
 #import "ELTheme.h"
+#import "ELUpdater.h"
 #import "ELYouTubeClient.h"
 
 @implementation ELAccountVC
@@ -36,6 +37,10 @@
     [_shakeSwitch release];
     [_cacheLabel release];
     [_clearCacheBtn release];
+    [_updateCard release];
+    [_updateStatusLabel release];
+    [_updateBtn release];
+    [_pendingUpdate release];
     [super dealloc];
 }
 
@@ -168,6 +173,35 @@
     [_clearCacheBtn addTarget:self action:@selector(onClearCacheTapped) forControlEvents:UIControlEventTouchUpInside];
     [_prefsCard addSubview:_clearCacheBtn];
 
+    /* 3. GitHub Updates Card */
+    _updateCard = [[UIView alloc] initWithFrame:CGRectMake(16, 368, 288, 122)];
+    _updateCard.backgroundColor = [ELTheme surfaceColor];
+    _updateCard.layer.cornerRadius = 12.0f;
+    _updateCard.layer.masksToBounds = YES;
+    [_scrollView addSubview:_updateCard];
+
+    UILabel *uTitle = [[[UILabel alloc] initWithFrame:CGRectMake(16, 12, 256, 18)] autorelease];
+    uTitle.backgroundColor = [UIColor clearColor];
+    uTitle.font = [UIFont boldSystemFontOfSize:12.0f];
+    uTitle.textColor = [ELTheme textSecondaryColor];
+    uTitle.text = @"GITHUB UPDATES";
+    [_updateCard addSubview:uTitle];
+
+    _updateStatusLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 34, 256, 34)];
+    _updateStatusLabel.backgroundColor = [UIColor clearColor];
+    _updateStatusLabel.font = [UIFont systemFontOfSize:12.0f];
+    _updateStatusLabel.textColor = [ELTheme textPrimaryColor];
+    _updateStatusLabel.numberOfLines = 2;
+    _updateStatusLabel.text = [NSString stringWithFormat:@"Installed: %@\nTap below to check GitHub Releases.",
+                               [[ELUpdater sharedUpdater] installedVersionLabel]];
+    [_updateCard addSubview:_updateStatusLabel];
+
+    _updateBtn = [[ELTheme pillButtonWithTitle:@"Check for Updates"
+                                         color:[ELTheme surfaceHighlightColor]
+                                         frame:CGRectMake(16, 74, 256, 36)] retain];
+    [_updateBtn addTarget:self action:@selector(onUpdateBtnTapped) forControlEvents:UIControlEventTouchUpInside];
+    [_updateCard addSubview:_updateBtn];
+
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refreshUI) name:ELAuthStateChangedNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refreshUI) name:ELLibraryUpdatedNotification object:nil];
 
@@ -191,6 +225,118 @@
     [[ELAudioEngine sharedEngine] postToast:[NSString stringWithFormat:@"Freed %.1f MB cache", mb]];
 }
 
+- (void)onUpdateBtnTapped {
+    if (_checkingUpdate || _installingUpdate) return;
+    if (_relaunchReady) {
+        exit(0);
+        return;
+    }
+    if (_pendingUpdate && _pendingUpdate.updateAvailable) {
+        [self startInstallPendingUpdate];
+        return;
+    }
+    _checkingUpdate = YES;
+    _updateBtn.enabled = NO;
+    [_updateBtn setTitle:@"Checking GitHub..." forState:UIControlStateNormal];
+    _updateStatusLabel.text = @"Connecting to api.github.com via TLS 1.2...";
+    [NSThread detachNewThreadSelector:@selector(checkUpdateWorker) toTarget:self withObject:nil];
+}
+
+- (void)checkUpdateWorker {
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    NSString *err = nil;
+    ELUpdateInfo *info = [[ELUpdater sharedUpdater] checkForUpdateWithError:&err];
+    NSMutableDictionary *res = [NSMutableDictionary dictionary];
+    if (info) [res setObject:info forKey:@"info"];
+    if (err)  [res setObject:err forKey:@"error"];
+    [self performSelectorOnMainThread:@selector(onCheckUpdateDone:) withObject:res waitUntilDone:NO];
+    [pool release];
+}
+
+- (void)onCheckUpdateDone:(NSDictionary *)res {
+    _checkingUpdate = NO;
+    _updateBtn.enabled = YES;
+    ELUpdateInfo *info = [res objectForKey:@"info"];
+    NSString *err = [res objectForKey:@"error"];
+    if (!info) {
+        [_updateBtn setTitle:@"Check for Updates" forState:UIControlStateNormal];
+        _updateStatusLabel.text = err ? err : @"Could not check GitHub.";
+        return;
+    }
+
+    [_pendingUpdate release];
+    _pendingUpdate = [info retain];
+    if (info.updateAvailable) {
+        NSString *sz = (info.binarySize > 0)
+            ? [NSString stringWithFormat:@" (%.0f KB)", (double)info.binarySize / 1024.0]
+            : @"";
+        _updateStatusLabel.text = [NSString stringWithFormat:@"New build ready: %@%@", info.releaseTitle, sz];
+        _updateBtn.backgroundColor = [ELTheme accentColor];
+        [_updateBtn setTitle:@"Install Update from GitHub" forState:UIControlStateNormal];
+    } else {
+        _updateStatusLabel.text = [NSString stringWithFormat:@"Up to date (%@)", info.releaseTitle];
+        _updateBtn.backgroundColor = [ELTheme surfaceHighlightColor];
+        [_updateBtn setTitle:@"Re-check GitHub" forState:UIControlStateNormal];
+    }
+}
+
+- (void)startInstallPendingUpdate {
+    if (!_pendingUpdate || _installingUpdate) return;
+    _installingUpdate = YES;
+    _updateBtn.enabled = NO;
+    [_updateBtn setTitle:@"Downloading Update..." forState:UIControlStateNormal];
+    _updateStatusLabel.text = @"Downloading signed armv6 build from GitHub...";
+    [NSThread detachNewThreadSelector:@selector(installUpdateWorker:) toTarget:self withObject:_pendingUpdate];
+}
+
+- (void)installUpdateWorker:(ELUpdateInfo *)info {
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    NSString *err = nil;
+    NSString *ipaPath = nil;
+    BOOL ok = [[ELUpdater sharedUpdater] installUpdate:info savedIPAPath:&ipaPath error:&err];
+    NSMutableDictionary *res = [NSMutableDictionary dictionaryWithObject:[NSNumber numberWithBool:ok] forKey:@"ok"];
+    if (ipaPath) [res setObject:ipaPath forKey:@"ipaPath"];
+    if (err)     [res setObject:err forKey:@"error"];
+    [self performSelectorOnMainThread:@selector(onInstallUpdateDone:) withObject:res waitUntilDone:NO];
+    [pool release];
+}
+
+- (void)onInstallUpdateDone:(NSDictionary *)res {
+    _installingUpdate = NO;
+    _updateBtn.enabled = YES;
+    BOOL ok = [[res objectForKey:@"ok"] boolValue];
+    NSString *ipaPath = [res objectForKey:@"ipaPath"];
+    NSString *err = [res objectForKey:@"error"];
+    if (ok && !ipaPath) {
+        _relaunchReady = YES;
+        [_pendingUpdate release];
+        _pendingUpdate = nil;
+        _updateStatusLabel.text = [NSString stringWithFormat:@"Updated to %@!\nTap below to close and relaunch.",
+                                   [[ELUpdater sharedUpdater] installedVersionLabel]];
+        _updateBtn.backgroundColor = [ELTheme successColor];
+        [_updateBtn setTitle:@"Close App to Relaunch" forState:UIControlStateNormal];
+        UIAlertView *av = [[[UIAlertView alloc] initWithTitle:@"Update Installed"
+                                                      message:@"EchoLegacy has been updated from GitHub. Tap Relaunch to close the app, then tap the EchoLegacy icon."
+                                                     delegate:self
+                                            cancelButtonTitle:@"Later"
+                                            otherButtonTitles:@"Relaunch", nil] autorelease];
+        [av show];
+    } else if (ok && ipaPath) {
+        _updateStatusLabel.text = [NSString stringWithFormat:@"Saved IPA to %@", [ipaPath lastPathComponent]];
+        [_updateBtn setTitle:@"Check for Updates" forState:UIControlStateNormal];
+    } else {
+        _updateStatusLabel.text = err ? err : @"Update failed.";
+        [_updateBtn setTitle:@"Retry Update" forState:UIControlStateNormal];
+    }
+}
+
+- (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {
+    (void)alertView;
+    if (buttonIndex == 1 && _relaunchReady) {
+        exit(0);
+    }
+}
+
 - (void)refreshUI {
     ELAuthManager *auth = [ELAuthManager sharedManager];
     ELYouTubeClient *yt = [ELYouTubeClient sharedClient];
@@ -199,6 +345,7 @@
     double cacheMB = (double)[[ELImageCache sharedCache] diskCacheBytes] / (1024.0 * 1024.0);
     _cacheLabel.text = [NSString stringWithFormat:@"Album Art Cache\n%.1f MB on disk", cacheMB];
 
+    CGFloat prefsY;
     if ([auth isSignedIn]) {
         _statusDot.backgroundColor = [ELTheme successColor];
         NSString *name = [auth accountName];
@@ -212,8 +359,7 @@
         _secondaryBtn.hidden = NO;
         _codeCard.hidden = YES;
         [_spinner stopAnimating];
-        _prefsCard.frame = CGRectMake(16, 224, 288, 134);
-        _scrollView.contentSize = CGSizeMake(320, 440);
+        prefsY = 224.0f;
     } else {
         _statusDot.backgroundColor = [ELTheme textSecondaryColor];
         _accountTitleLabel.text = @"Not Signed In";
@@ -221,10 +367,13 @@
         [_primaryBtn setTitle:@"Sign In with Google" forState:UIControlStateNormal];
         _primaryBtn.enabled = YES;
         _secondaryBtn.hidden = YES;
-        CGFloat py = _codeCard.hidden ? 178.0f : 346.0f;
-        _prefsCard.frame = CGRectMake(16, py, 288, 134);
-        _scrollView.contentSize = CGSizeMake(320, py + 200.0f);
+        prefsY = _codeCard.hidden ? 178.0f : 346.0f;
     }
+
+    _prefsCard.frame = CGRectMake(16, prefsY, 288, 134);
+    CGFloat updateY = prefsY + 146.0f;
+    _updateCard.frame = CGRectMake(16, updateY, 288, 122);
+    _scrollView.contentSize = CGSizeMake(320, updateY + 188.0f);
 }
 
 - (void)onPrimaryTapped {
