@@ -7,7 +7,8 @@ set -euo pipefail
 #   - Supports SSH key auth first (IPOD_SSH_KEY=/path/to/id_rsa) or explicit IPOD_PASS env var.
 #   - Uses dedicated known_hosts file with StrictHostKeyChecking=accept-new.
 #   - Stages upload to a root-owned temp directory, verifies file sizes & hashes on device,
-#     and installs /Applications/EchoLegacy.app owned by root:wheel (0755 dir/binary, 0644 resources).
+#     and installs /Applications/EchoLegacy.app owned by mobile:mobile (0755 dir/binary, 0644 resources)
+#     so on-device 1-tap OTA self-updates can atomically replace the bundle.
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_SRC="${DIR}/build/EchoLegacy.app"
@@ -115,7 +116,7 @@ if ! tar -C "${DIR}/build" -cf - EchoLegacy.app | \
       [ \"\$(openssl dgst -sha256 \"\$STAGE_DIR/EchoLegacy.app/cacert.pem\" | awk '{print \$NF}')\" = '${CA_SHA256}' ]
     fi
 
-    chown -R root:wheel \"\$STAGE_DIR/EchoLegacy.app\"
+    chown -R mobile:mobile \"\$STAGE_DIR/EchoLegacy.app\"
     chmod 755 \"\$STAGE_DIR/EchoLegacy.app\" \"\$STAGE_DIR/EchoLegacy.app/EchoLegacy\"
     find \"\$STAGE_DIR/EchoLegacy.app\" -type f ! -name 'EchoLegacy' -exec chmod 644 {} +
 
@@ -131,7 +132,7 @@ fi
 echo "[4/5] Refreshing SpringBoard icon cache (uicache + icon cache reset)..."
 "${SSH_CMD[@]}" "rm -rf /var/mobile/Library/Caches/com.apple.IconsCache /var/mobile/Library/Caches/com.apple.springboard.sharedimagecache 2>/dev/null || true; su mobile -c uicache && killall SpringBoard" || echo "[!] uicache returned non-zero; try respringing if icon doesn't appear."
 
-echo "[5/5] Verifying installed binary & root:wheel ownership on iPod..."
+echo "[5/5] Verifying installed binary & mobile:mobile ownership on iPod..."
 "${SSH_CMD[@]}" "ls -ld /Applications/EchoLegacy.app && ls -lh /Applications/EchoLegacy.app/EchoLegacy /Applications/EchoLegacy.app/cacert.pem" || exit 1
 
 echo "[+] Done! EchoLegacy is installed on your iPod touch 2G."

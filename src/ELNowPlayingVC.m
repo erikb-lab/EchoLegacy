@@ -258,6 +258,7 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     _lyricsTable.backgroundColor = [UIColor clearColor];
     _lyricsTable.separatorStyle = UITableViewCellSeparatorStyleNone;
     _lyricsTable.showsVerticalScrollIndicator = NO;
+    _lyricsTable.contentInset = UIEdgeInsetsMake(64.0f, 0.0f, 64.0f, 0.0f);
     _lyricsTable.dataSource = self;
     _lyricsTable.delegate = self;
     [_lyricsContainer addSubview:_lyricsTable];
@@ -1077,6 +1078,38 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     }
 }
 
+- (void)styleLyricCell:(UITableViewCell *)cell forRow:(NSInteger)row line:(ELLyricLine *)line {
+    if (!cell || !line) return;
+    if (line.timeSeconds < 0.0) {
+        cell.textLabel.font = [UIFont systemFontOfSize:14.0f];
+        cell.textLabel.textColor = [UIColor colorWithWhite:1.0f alpha:0.86f];
+    } else if (row == _activeLyricIndex) {
+        cell.textLabel.font = [UIFont boldSystemFontOfSize:16.0f];
+        cell.textLabel.textColor = [UIColor whiteColor];
+    } else if (_activeLyricIndex >= 0 && row < _activeLyricIndex) {
+        cell.textLabel.font = [UIFont systemFontOfSize:14.0f];
+        cell.textLabel.textColor = [UIColor colorWithWhite:1.0f alpha:0.34f];
+    } else {
+        cell.textLabel.font = [UIFont systemFontOfSize:14.0f];
+        cell.textLabel.textColor = [UIColor colorWithWhite:1.0f alpha:0.58f];
+    }
+}
+
+- (void)setActiveLyricIndex:(NSInteger)newIndex scroll:(BOOL)shouldScroll {
+    NSInteger count = (NSInteger)[_lyricLines count];
+    _activeLyricIndex = newIndex;
+    for (NSIndexPath *ip in [_lyricsTable indexPathsForVisibleRows]) {
+        if ((NSInteger)ip.row >= 0 && (NSInteger)ip.row < count) {
+            UITableViewCell *cell = [_lyricsTable cellForRowAtIndexPath:ip];
+            [self styleLyricCell:cell forRow:(NSInteger)ip.row line:[_lyricLines objectAtIndex:ip.row]];
+        }
+    }
+    if (shouldScroll && _activeLyricIndex >= 0 && _activeLyricIndex < count) {
+        NSIndexPath *ip = [NSIndexPath indexPathForRow:_activeLyricIndex inSection:0];
+        [_lyricsTable scrollToRowAtIndexPath:ip atScrollPosition:UITableViewScrollPositionMiddle animated:YES];
+    }
+}
+
 - (void)updateActiveLyricForTime:(double)curTime {
     if (!_lyricLines || [_lyricLines count] == 0) return;
     ELLyricLine *first = [_lyricLines objectAtIndex:0];
@@ -1094,24 +1127,7 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     }
 
     if (found != _activeLyricIndex) {
-        NSInteger prevIdx = _activeLyricIndex;
-        _activeLyricIndex = found;
-        if (prevIdx >= 0 && prevIdx < count) {
-            UITableViewCell *oldCell = [_lyricsTable cellForRowAtIndexPath:[NSIndexPath indexPathForRow:prevIdx inSection:0]];
-            if (oldCell) {
-                oldCell.textLabel.font = [UIFont systemFontOfSize:14.0f];
-                oldCell.textLabel.textColor = [UIColor colorWithWhite:1.0f alpha:0.46f];
-            }
-        }
-        if (_activeLyricIndex >= 0 && _activeLyricIndex < count) {
-            NSIndexPath *ip = [NSIndexPath indexPathForRow:_activeLyricIndex inSection:0];
-            UITableViewCell *newCell = [_lyricsTable cellForRowAtIndexPath:ip];
-            if (newCell) {
-                newCell.textLabel.font = [UIFont boldSystemFontOfSize:16.0f];
-                newCell.textLabel.textColor = [UIColor whiteColor];
-            }
-            [_lyricsTable scrollToRowAtIndexPath:ip atScrollPosition:UITableViewScrollPositionMiddle animated:YES];
-        }
+        [self setActiveLyricIndex:found scroll:YES];
     }
 }
 
@@ -1141,17 +1157,17 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     }
     ELLyricLine *line = [_lyricLines objectAtIndex:indexPath.row];
     cell.textLabel.text = line.text;
-    if (line.timeSeconds < 0.0) {
-        cell.textLabel.font = [UIFont systemFontOfSize:14.0f];
-        cell.textLabel.textColor = [UIColor colorWithWhite:1.0f alpha:0.86f];
-    } else if ((NSInteger)indexPath.row == _activeLyricIndex) {
-        cell.textLabel.font = [UIFont boldSystemFontOfSize:16.0f];
-        cell.textLabel.textColor = [UIColor whiteColor];
-    } else {
-        cell.textLabel.font = [UIFont systemFontOfSize:14.0f];
-        cell.textLabel.textColor = [UIColor colorWithWhite:1.0f alpha:0.46f];
-    }
+    [self styleLyricCell:cell forRow:(NSInteger)indexPath.row line:line];
     return cell;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (!_lyricLines || indexPath.row >= [_lyricLines count]) return;
+    ELLyricLine *line = [_lyricLines objectAtIndex:indexPath.row];
+    if (line.timeSeconds < 0.0) return;
+    [[ELAudioEngine sharedEngine] seekToSeconds:line.timeSeconds];
+    [self setActiveLyricIndex:(NSInteger)indexPath.row scroll:YES];
 }
 #endif
 

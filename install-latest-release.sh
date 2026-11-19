@@ -186,7 +186,7 @@ if ! tar -C "${WORK_DIR}/Payload" -cf - EchoLegacy.app | \
       [ \"\$(openssl dgst -sha256 \"\$STAGE_DIR/EchoLegacy.app/cacert.pem\" | awk '{print \$NF}')\" = '${CA_SHA256}' ]
     fi
 
-    chown -R root:wheel \"\$STAGE_DIR/EchoLegacy.app\"
+    chown -R mobile:mobile \"\$STAGE_DIR/EchoLegacy.app\"
     chmod 755 \"\$STAGE_DIR/EchoLegacy.app\" \"\$STAGE_DIR/EchoLegacy.app/EchoLegacy\"
     find \"\$STAGE_DIR/EchoLegacy.app\" -type f ! -name 'EchoLegacy' -exec chmod 644 {} +
 
