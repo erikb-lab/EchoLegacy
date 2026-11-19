@@ -487,7 +487,7 @@ static UIColor *el_backdrop_color_from_rgb(float r, float g, float b) {
 
     const size_t px = 96;
     const CGFloat fSize = 96.0f;
-    CGContextRef ctx = el_create_argb_bitmap_context(px);
+    CGContextRef ctx = el_create_bitmap_context(px, px, YES);
     if (!ctx) return nil;
 
     /* Flip to top-left UIKit coordinates so note geometry renders identically on any thread */
