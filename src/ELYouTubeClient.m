@@ -401,6 +401,38 @@ static void el_collect_tracks_recursive(id node, NSMutableArray *outTracks, NSMu
     }
 }
 
+static NSString *el_extract_continuation_token(id node) {
+    if ([node isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dict = (NSDictionary *)node;
+        NSArray *conts = [ELJSON array:dict forKey:@"continuations"];
+        if (conts) {
+            for (id item in conts) {
+                NSDictionary *ncd = [ELJSON dict:item forKey:@"nextContinuationData"];
+                NSString *tok = [ELJSON string:ncd forKey:@"continuation"];
+                if ([tok length] > 0) return tok;
+                NSDictionary *nrcd = [ELJSON dict:item forKey:@"nextRadioContinuationData"];
+                tok = [ELJSON string:nrcd forKey:@"continuation"];
+                if ([tok length] > 0) return tok;
+            }
+        }
+        NSDictionary *cmd = [ELJSON dict:dict forKey:@"continuationCommand"];
+        if (cmd) {
+            NSString *tok = [ELJSON string:cmd forKey:@"token"];
+            if ([tok length] > 0) return tok;
+        }
+        for (id key in dict) {
+            NSString *found = el_extract_continuation_token([dict objectForKey:key]);
+            if ([found length] > 0) return found;
+        }
+    } else if ([node isKindOfClass:[NSArray class]]) {
+        for (id child in (NSArray *)node) {
+            NSString *found = el_extract_continuation_token(child);
+            if ([found length] > 0) return found;
+        }
+    }
+    return nil;
+}
+
 static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists, NSMutableSet *seenIds) {
     if ([node isKindOfClass:[NSDictionary class]]) {
         NSDictionary *dict = (NSDictionary *)node;
@@ -920,7 +952,7 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
     return [NSDictionary dictionaryWithObjectsAndKeys:client, @"client", nil];
 }
 
-- (NSDictionary *)postTVBrowseId:(NSString *)browseId error:(NSString **)outError {
+- (NSDictionary *)postTVBrowseBody:(NSDictionary *)extraBody error:(NSString **)outError {
     NSString *authErr = nil;
     NSString *token = [[ELAuthManager sharedManager] validAccessTokenWithError:&authErr];
     if ([token length] == 0) {
@@ -928,10 +960,8 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
         return nil;
     }
 
-    NSDictionary *body = [NSDictionary dictionaryWithObjectsAndKeys:
-                          [self tvContext], @"context",
-                          browseId, @"browseId",
-                          nil];
+    NSMutableDictionary *body = [NSMutableDictionary dictionaryWithObject:[self tvContext] forKey:@"context"];
+    if (extraBody) [body addEntriesFromDictionary:extraBody];
     NSDictionary *headers = [NSDictionary dictionaryWithObjectsAndKeys:
                              @"application/json", @"Content-Type",
                              @"Mozilla/5.0 (Cobalt/Version)", @"User-Agent",
@@ -955,23 +985,65 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
     return json;
 }
 
+- (NSDictionary *)postTVBrowseId:(NSString *)browseId error:(NSString **)outError {
+    return [self postTVBrowseBody:[NSDictionary dictionaryWithObject:browseId forKey:@"browseId"] error:outError];
+}
+
 - (NSArray *)fetchTracksForPlaylistId:(NSString *)playlistId error:(NSString **)outError {
     NSString *browseId = [playlistId hasPrefix:@"VL"] ? playlistId : [NSString stringWithFormat:@"VL%@", playlistId];
-    NSDictionary *json = nil;
-    if ([[ELAuthManager sharedManager] isSignedIn]) {
-        json = [self postTVBrowseId:browseId error:outError];
-    } else {
-        NSDictionary *body = [NSDictionary dictionaryWithObjectsAndKeys:
-                              [self webRemixContext], @"context",
-                              browseId, @"browseId",
-                              nil];
-        json = [self postYTMusicEndpoint:@"browse" body:body authenticated:NO error:outError];
-    }
-    if (!json) return nil;
+    BOOL signedIn = [[ELAuthManager sharedManager] isSignedIn];
 
     NSMutableArray *tracks = [NSMutableArray array];
-    NSMutableSet *seen = [NSMutableSet set];
-    el_collect_tracks_recursive(json, tracks, seen);
+    NSMutableSet *seenIds = [NSMutableSet set];
+    NSMutableSet *seenTokens = [NSMutableSet set];
+    NSString *contToken = nil;
+
+    for (int page = 0; page < 50; page++) {
+        NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+        NSDictionary *json = nil;
+        NSString *pageErr = nil;
+
+        if (signedIn) {
+            NSDictionary *extra = contToken
+                ? [NSDictionary dictionaryWithObject:contToken forKey:@"continuation"]
+                : [NSDictionary dictionaryWithObject:browseId forKey:@"browseId"];
+            json = [self postTVBrowseBody:extra error:&pageErr];
+        } else {
+            NSMutableDictionary *body = [NSMutableDictionary dictionaryWithObject:[self webRemixContext] forKey:@"context"];
+            if (contToken) {
+                [body setObject:contToken forKey:@"continuation"];
+            } else {
+                [body setObject:browseId forKey:@"browseId"];
+            }
+            json = [self postYTMusicEndpoint:@"browse" body:body authenticated:NO error:&pageErr];
+        }
+
+        if (!json) {
+            NSString *copiedErr = [pageErr copy];
+            [pool release];
+            if (page == 0) {
+                if (outError && copiedErr) *outError = [copiedErr autorelease];
+                else [copiedErr release];
+                return nil;
+            }
+            [copiedErr release];
+            break;
+        }
+
+        NSUInteger beforeCount = [tracks count];
+        el_collect_tracks_recursive(json, tracks, seenIds);
+        NSString *nextTok = el_extract_continuation_token(json);
+
+        if ([nextTok length] == 0 || [seenTokens containsObject:nextTok] || [tracks count] == beforeCount) {
+            [pool release];
+            break;
+        }
+        [seenTokens addObject:nextTok];
+        contToken = [nextTok retain];
+        [pool release];
+        [contToken autorelease];
+    }
+
     return tracks;
 }
 
@@ -981,20 +1053,46 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
         return NO;
     }
 
-    /* 1. Fetch Liked Music (VLLM) via TVHTML5 OAuth client */
+    /* 1. Fetch ALL Liked Music (VLLM) via TVHTML5 OAuth client with pagination */
     NSString *likedErr = nil;
     NSArray *liked = [self fetchTracksForPlaylistId:@"VLLM" error:&likedErr];
 
-    /* 2. Fetch Library Playlists (FEplaylist_aggregation) via TVHTML5 OAuth client */
+    /* 2. Fetch ALL Library Playlists (FEplaylist_aggregation) with pagination */
     NSString *plErr = nil;
-    NSDictionary *plJson = [self postTVBrowseId:@"FEplaylist_aggregation" error:&plErr];
     NSMutableArray *playlists = [NSMutableArray array];
-    if (plJson) {
-        NSMutableSet *seenPl = [NSMutableSet set];
-        el_collect_playlists_recursive(plJson, playlists, seenPl);
-    }
+    NSMutableSet *seenPl = [NSMutableSet set];
+    NSMutableSet *seenPlTokens = [NSMutableSet set];
+    NSString *plCont = nil;
+    BOOL anyPlPageOK = NO;
 
-    if (!liked && !plJson) {
+    for (int page = 0; page < 10; page++) {
+        NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+        NSDictionary *extra = plCont
+            ? [NSDictionary dictionaryWithObject:plCont forKey:@"continuation"]
+            : [NSDictionary dictionaryWithObject:@"FEplaylist_aggregation" forKey:@"browseId"];
+        NSString *pageErr = nil;
+        NSDictionary *plJson = [self postTVBrowseBody:extra error:&pageErr];
+        if (!plJson) {
+            if (page == 0 && pageErr) plErr = [pageErr copy];
+            [pool release];
+            break;
+        }
+        anyPlPageOK = YES;
+        NSUInteger beforeCount = [playlists count];
+        el_collect_playlists_recursive(plJson, playlists, seenPl);
+        NSString *nextTok = el_extract_continuation_token(plJson);
+        if ([nextTok length] == 0 || [seenPlTokens containsObject:nextTok] || [playlists count] == beforeCount) {
+            [pool release];
+            break;
+        }
+        [seenPlTokens addObject:nextTok];
+        plCont = [nextTok retain];
+        [pool release];
+        [plCont autorelease];
+    }
+    [plErr autorelease];
+
+    if (!liked && !anyPlPageOK) {
         if (outError) *outError = likedErr ? likedErr : (plErr ? plErr : @"Library sync failed");
         return NO;
     }
