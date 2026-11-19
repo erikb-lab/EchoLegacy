@@ -6,8 +6,11 @@
 
 NSString *const ELAuthStateChangedNotification = @"ELAuthStateChangedNotification";
 
-/* Narrowed least-privilege OAuth scope (Flaw #3) */
-static NSString *const kOAuthScope = @"https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/userinfo.profile";
+/* EXPERIMENTAL: broadened from youtube.readonly back to the full youtube scope because
+ * InnerTube browse and like/removelike calls were rejected with ACCESS_TOKEN_SCOPE_INSUFFICIENT
+ * after commit 83a5272 narrowed the scope. This lets the app modify the YouTube account
+ * (likes/playlists). Revert to youtube.readonly if needed. */
+static NSString *const kOAuthScope = @"https://www.googleapis.com/auth/youtube https://www.googleapis.com/auth/userinfo.profile";
 static NSString *const kKeychainService = @"com.echolegacy.oauth";
 static NSString *const kKeychainAccountAccessToken = @"accessToken";
 static NSString *const kKeychainAccountRefreshToken = @"refreshToken";

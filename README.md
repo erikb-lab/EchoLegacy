@@ -23,3 +23,6 @@ A **100% standalone, device-side** YouTube Music client base for **iPod touch 2G
 - `src/ELAudioEngine.{h,m}` — Unified streaming (`AudioQueue`) + offline (`AVAudioPlayer`) playback
 - `src/ELDownloadManager.{h,m}` — Offline download queue & storage
 - `src/ELTheme.{h,m}` & `src/*VC.{h,m}` — Dark programmatic UIKit views
+
+## ⚠️ Experimental: OAuth scope
+This build requests the full `https://www.googleapis.com/auth/youtube` scope (previously narrowed to `youtube.readonly` in commit `83a5272`) to fix `Request had insufficient authentication scopes` errors on InnerTube `browse` and `like` calls. It is **experimental** and grants write access to your YouTube account. To undo: revert this commit, then revoke the app at https://myaccount.google.com/permissions and sign in again.
