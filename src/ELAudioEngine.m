@@ -7,9 +7,9 @@
 #include <stdio.h>
 #include <unistd.h>
 #if EL_FEATURE_OFFLINE_CROSSFADE
+#include <sys/socket.h>
 #include <ifaddrs.h>
 #include <net/if.h>
-#include <sys/socket.h>
 #include <string.h>
 #endif
 
