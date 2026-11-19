@@ -1,9 +1,15 @@
 #import "ELNowPlayingVC.h"
 #import "ELAudioEngine.h"
+#if EL_FEATURE_DOCK_MODE
+#import "ELDockModeVC.h"
+#endif
 #if EL_FEATURE_DOWNLOADS
 #import "ELDownloadManager.h"
 #endif
 #import "ELImageCache.h"
+#if EL_FEATURE_LOCAL_PLAYLISTS
+#import "ELLocalPlaylistManager.h"
+#endif
 #if EL_FEATURE_LYRICS
 #import "ELLyricsClient.h"
 #endif
@@ -514,6 +520,9 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
 #endif
 #if EL_FEATURE_LIKES
     [_inFlightLikeVideoId release];
+#endif
+#if EL_FEATURE_LOCAL_PLAYLISTS
+    [_pickerPlaylists release];
 #endif
     [_currentVideoId release];
     [super dealloc];
@@ -1186,9 +1195,21 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     _moreRadioIdx = -1;
     _moreSleepIdx = -1;
     _moreDownloadIdx = -1;
+#if EL_FEATURE_DOCK_MODE
+    _moreDockIdx = -1;
+#endif
+#if EL_FEATURE_LOCAL_PLAYLISTS
+    _morePlaylistIdx = -1;
+#endif
 
 #if EL_FEATURE_RADIO_MIX
     _moreRadioIdx = [sheet addButtonWithTitle:@"Start Radio Mix"];
+#endif
+#if EL_FEATURE_LOCAL_PLAYLISTS
+    _morePlaylistIdx = [sheet addButtonWithTitle:@"Add to Offline Playlist"];
+#endif
+#if EL_FEATURE_DOCK_MODE
+    _moreDockIdx = [sheet addButtonWithTitle:@"Dock Mode"];
 #endif
 #if EL_FEATURE_SLEEP_TIMER
     NSInteger rem = [[ELAudioEngine sharedEngine] sleepTimerRemainingSeconds];
@@ -1207,6 +1228,27 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     sheet.tag = 1;
     [sheet showInView:self.view];
 }
+
+#if EL_FEATURE_LOCAL_PLAYLISTS
+- (void)showAddToPlaylistSheet {
+    [_pickerPlaylists release];
+    _pickerPlaylists = [[[ELLocalPlaylistManager sharedManager] playlists] retain];
+
+    UIActionSheet *sheet = [[[UIActionSheet alloc] initWithTitle:@"Add to Offline Playlist"
+                                                        delegate:self
+                                               cancelButtonTitle:nil
+                                          destructiveButtonTitle:nil
+                                               otherButtonTitles:nil] autorelease];
+    for (ELLocalPlaylist *pl in _pickerPlaylists) {
+        [sheet addButtonWithTitle:pl.name];
+    }
+    [sheet addButtonWithTitle:@"New 'Favorites' Playlist"];
+    sheet.cancelButtonIndex = [sheet addButtonWithTitle:@"Cancel"];
+    sheet.actionSheetStyle = UIActionSheetStyleBlackTranslucent;
+    sheet.tag = 3;
+    [sheet showInView:self.view];
+}
+#endif
 
 #if EL_FEATURE_SLEEP_TIMER
 - (void)showSleepTimerSheet {
@@ -1231,6 +1273,19 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
         if (buttonIndex == _moreRadioIdx) {
             [[ELAudioEngine sharedEngine] postToast:@"Starting Radio Mix..."];
             [NSThread detachNewThreadSelector:@selector(radioWorker:) toTarget:self withObject:track.videoId];
+            return;
+        }
+#endif
+#if EL_FEATURE_LOCAL_PLAYLISTS
+        if (buttonIndex == _morePlaylistIdx) {
+            [self showAddToPlaylistSheet];
+            return;
+        }
+#endif
+#if EL_FEATURE_DOCK_MODE
+        if (buttonIndex == _moreDockIdx) {
+            ELDockModeVC *dvc = [[[ELDockModeVC alloc] init] autorelease];
+            [self presentModalViewController:dvc animated:YES];
             return;
         }
 #endif
@@ -1264,6 +1319,29 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
             ? [NSString stringWithFormat:@"Sleep timer: %ld min", (long)mins]
             : @"Sleep timer off";
         [[ELAudioEngine sharedEngine] postToast:msg];
+    }
+#endif
+#if EL_FEATURE_LOCAL_PLAYLISTS
+    else if (actionSheet.tag == 3) {
+        ELTrack *track = [[ELAudioEngine sharedEngine] currentTrack];
+        if (!track) return;
+        ELLocalPlaylistManager *mgr = [ELLocalPlaylistManager sharedManager];
+        if (buttonIndex >= 0 && (NSUInteger)buttonIndex < [_pickerPlaylists count]) {
+            ELLocalPlaylist *pl = [_pickerPlaylists objectAtIndex:(NSUInteger)buttonIndex];
+            BOOL added = [mgr addTrack:track toPlaylistId:pl.playlistId];
+            NSString *msg = added
+                ? [NSString stringWithFormat:@"Added to %@", pl.name]
+                : [NSString stringWithFormat:@"Already in %@", pl.name];
+            [[ELAudioEngine sharedEngine] postToast:msg];
+        } else {
+            ELLocalPlaylist *pl = [mgr createPlaylistNamed:@"Favorites"];
+            if (pl) {
+                [mgr addTrack:track toPlaylistId:pl.playlistId];
+                [[ELAudioEngine sharedEngine] postToast:[NSString stringWithFormat:@"Added to %@", pl.name]];
+            }
+        }
+        [_pickerPlaylists release];
+        _pickerPlaylists = nil;
     }
 #endif
 }

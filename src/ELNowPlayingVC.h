@@ -2,7 +2,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import "ELFeatures.h"
 
-#define EL_NP_HAS_MORE_MENU (EL_FEATURE_RADIO_MIX || EL_FEATURE_SLEEP_TIMER || EL_FEATURE_DOWNLOADS)
+#define EL_NP_HAS_MORE_MENU (EL_FEATURE_RADIO_MIX || EL_FEATURE_SLEEP_TIMER || EL_FEATURE_DOWNLOADS || EL_FEATURE_DOCK_MODE || EL_FEATURE_LOCAL_PLAYLISTS)
 
 @interface ELNowPlayingVC : UIViewController
 #if EL_FEATURE_LYRICS || EL_NP_HAS_MORE_MENU
@@ -48,6 +48,13 @@
     NSInteger _moreRadioIdx;
     NSInteger _moreSleepIdx;
     NSInteger _moreDownloadIdx;
+#if EL_FEATURE_DOCK_MODE
+    NSInteger _moreDockIdx;
+#endif
+#if EL_FEATURE_LOCAL_PLAYLISTS
+    NSInteger _morePlaylistIdx;
+    NSArray *_pickerPlaylists;
+#endif
 #endif
 #if EL_FEATURE_LIKES
     UIButton *_likeBtn;

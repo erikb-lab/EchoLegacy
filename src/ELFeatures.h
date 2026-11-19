@@ -85,4 +85,14 @@
 #define EL_FEATURE_OTA_UPDATER 1
 #endif
 
+/* Custom offline playlists stored locally on-device */
+#ifndef EL_FEATURE_LOCAL_PLAYLISTS
+#define EL_FEATURE_LOCAL_PLAYLISTS 1
+#endif
+
+/* Full-screen nightstand/desk Dock Mode player with live clock, dimmer, and wake lock */
+#ifndef EL_FEATURE_DOCK_MODE
+#define EL_FEATURE_DOCK_MODE 1
+#endif
+
 #endif /* EL_FEATURES_H */

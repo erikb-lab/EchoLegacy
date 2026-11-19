@@ -29,7 +29,7 @@ A **100% standalone, device-side** YouTube Music client base for **iPod touch 2G
 ## Adding & Removing Features
 All optional tabs and player capabilities are gated in [`src/ELFeatures.h`](src/ELFeatures.h) via `EL_FEATURE_*` compile-time flags (all defaulting to `1` via `#ifndef`):
 - **Tabs**: `EL_FEATURE_HOME_TAB`, `EL_FEATURE_SEARCH_TAB`, `EL_FEATURE_LIBRARY_TAB`, `EL_FEATURE_DOWNLOADS` (plus `ELAccountVC`, which stays mounted for sign-in/diagnostics)
-- **Player & Experience**: `EL_FEATURE_LYRICS`, `EL_FEATURE_RADIO_MIX`, `EL_FEATURE_SLEEP_TIMER`, `EL_FEATURE_LIKES`, `EL_FEATURE_MARQUEE`, `EL_FEATURE_SHAKE_SHUFFLE`, `EL_FEATURE_OTA_UPDATER`
+- **Player & Experience**: `EL_FEATURE_LYRICS`, `EL_FEATURE_RADIO_MIX`, `EL_FEATURE_SLEEP_TIMER`, `EL_FEATURE_LIKES`, `EL_FEATURE_MARQUEE`, `EL_FEATURE_SHAKE_SHUFFLE`, `EL_FEATURE_OTA_UPDATER`, `EL_FEATURE_LOCAL_PLAYLISTS`, `EL_FEATURE_DOCK_MODE`
 
 To **disable** a feature, set its flag to `0` in `src/ELFeatures.h` or pass `-DEL_FEATURE_<NAME>=0` in `Makefile` `COMMON_FLAGS`.  
 To **add a new tab**, define a new `EL_FEATURE_<NAME>` flag in `src/ELFeatures.h`, create `src/EL<Name>VC.{h,m}` (auto-compiled by `Makefile`), and mount it inside `ELAppDelegate`'s `buildTabViewControllers` using `appendTabWithController:toArray:`.
