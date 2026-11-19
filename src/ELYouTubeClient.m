@@ -31,6 +31,29 @@ static NSString *el_library_cache_path(void) {
     return [dir stringByAppendingPathComponent:@"library_cache.plist"];
 }
 
+static NSString *el_playlists_cache_dir(void) {
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *docs = ([paths count] > 0) ? [paths objectAtIndex:0] : NSTemporaryDirectory();
+    NSString *dir = [docs stringByAppendingPathComponent:@"EchoLegacy/playlists"];
+    NSFileManager *fm = [[[NSFileManager alloc] init] autorelease];
+    [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    return dir;
+}
+
+static NSString *el_sanitize_playlist_filename(NSString *playlistId) {
+    if ([playlistId length] == 0) return @"unknown";
+    NSMutableString *out = [NSMutableString stringWithCapacity:[playlistId length]];
+    for (NSUInteger i = 0; i < [playlistId length]; i++) {
+        unichar c = [playlistId characterAtIndex:i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+            [out appendFormat:@"%C", c];
+        } else {
+            [out appendString:@"_"];
+        }
+    }
+    return out;
+}
+
 /* Rewrites Google/YouTube thumbnail URLs to a clean iOS 4.1-compatible JPEG */
 static NSString *el_resize_google_thumb(NSString *url, int size) {
     if ([url length] == 0) return @"";
@@ -609,7 +632,34 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
     }
     NSFileManager *fm = [[[NSFileManager alloc] init] autorelease];
     [fm removeItemAtPath:el_library_cache_path() error:nil];
+    [fm removeItemAtPath:el_playlists_cache_dir() error:nil];
     [self performSelectorOnMainThread:@selector(postLibraryUpdatedOnMain) withObject:nil waitUntilDone:NO];
+}
+
+- (NSArray *)cachedTracksForPlaylistId:(NSString *)playlistId {
+    if ([playlistId length] == 0) return nil;
+    NSString *fname = [NSString stringWithFormat:@"%@.plist", el_sanitize_playlist_filename(playlistId)];
+    NSString *path = [el_playlists_cache_dir() stringByAppendingPathComponent:fname];
+    NSArray *arr = [NSArray arrayWithContentsOfFile:path];
+    if (![arr isKindOfClass:[NSArray class]] || [arr count] == 0) return nil;
+    NSMutableArray *tracks = [NSMutableArray arrayWithCapacity:[arr count]];
+    for (id item in arr) {
+        ELTrack *t = [ELTrack trackFromDictionary:item];
+        if (t && [t.videoId length] > 0) [tracks addObject:t];
+    }
+    return ([tracks count] > 0) ? tracks : nil;
+}
+
+- (void)saveCachedTracks:(NSArray *)tracks forPlaylistId:(NSString *)playlistId {
+    if ([playlistId length] == 0 || [tracks count] == 0) return;
+    NSMutableArray *arr = [NSMutableArray arrayWithCapacity:[tracks count]];
+    for (ELTrack *t in tracks) {
+        NSDictionary *d = [t toDictionary];
+        if (d) [arr addObject:d];
+    }
+    NSString *fname = [NSString stringWithFormat:@"%@.plist", el_sanitize_playlist_filename(playlistId)];
+    NSString *path = [el_playlists_cache_dir() stringByAppendingPathComponent:fname];
+    [arr writeToFile:path atomically:YES];
 }
 
 - (void)postLibraryUpdatedOnMain {
@@ -989,10 +1039,44 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
     return [self postTVBrowseBody:[NSDictionary dictionaryWithObject:browseId forKey:@"browseId"] error:outError];
 }
 
-- (NSArray *)fetchTracksForPlaylistId:(NSString *)playlistId error:(NSString **)outError {
+- (NSArray *)fetchPlaylistPageForId:(NSString *)playlistId
+                  continuationToken:(NSString *)contToken
+              nextContinuationToken:(NSString **)outNextToken
+                              error:(NSString **)outError {
+    if (outNextToken) *outNextToken = nil;
     NSString *browseId = [playlistId hasPrefix:@"VL"] ? playlistId : [NSString stringWithFormat:@"VL%@", playlistId];
     BOOL signedIn = [[ELAuthManager sharedManager] isSignedIn];
+    NSDictionary *json = nil;
 
+    if (signedIn) {
+        NSDictionary *extra = ([contToken length] > 0)
+            ? [NSDictionary dictionaryWithObject:contToken forKey:@"continuation"]
+            : [NSDictionary dictionaryWithObject:browseId forKey:@"browseId"];
+        json = [self postTVBrowseBody:extra error:outError];
+    } else {
+        NSMutableDictionary *body = [NSMutableDictionary dictionaryWithObject:[self webRemixContext] forKey:@"context"];
+        if ([contToken length] > 0) {
+            [body setObject:contToken forKey:@"continuation"];
+        } else {
+            [body setObject:browseId forKey:@"browseId"];
+        }
+        json = [self postYTMusicEndpoint:@"browse" body:body authenticated:NO error:outError];
+    }
+
+    if (!json) return nil;
+
+    NSMutableArray *pageTracks = [NSMutableArray array];
+    NSMutableSet *pageSeenIds = [NSMutableSet set];
+    el_collect_tracks_recursive(json, pageTracks, pageSeenIds);
+
+    NSString *nextTok = el_extract_continuation_token(json);
+    if (outNextToken && [nextTok length] > 0) {
+        *outNextToken = nextTok;
+    }
+    return pageTracks;
+}
+
+- (NSArray *)fetchTracksForPlaylistId:(NSString *)playlistId error:(NSString **)outError {
     NSMutableArray *tracks = [NSMutableArray array];
     NSMutableSet *seenIds = [NSMutableSet set];
     NSMutableSet *seenTokens = [NSMutableSet set];
@@ -1000,25 +1084,15 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
 
     for (int page = 0; page < 50; page++) {
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
-        NSDictionary *json = nil;
         NSString *pageErr = nil;
-
-        if (signedIn) {
-            NSDictionary *extra = contToken
-                ? [NSDictionary dictionaryWithObject:contToken forKey:@"continuation"]
-                : [NSDictionary dictionaryWithObject:browseId forKey:@"browseId"];
-            json = [self postTVBrowseBody:extra error:&pageErr];
-        } else {
-            NSMutableDictionary *body = [NSMutableDictionary dictionaryWithObject:[self webRemixContext] forKey:@"context"];
-            if (contToken) {
-                [body setObject:contToken forKey:@"continuation"];
-            } else {
-                [body setObject:browseId forKey:@"browseId"];
-            }
-            json = [self postYTMusicEndpoint:@"browse" body:body authenticated:NO error:&pageErr];
-        }
-
-        if (!json) {
+        NSString *nextTok = nil;
+        NSArray *pageTracks = [self fetchPlaylistPageForId:playlistId
+                                         continuationToken:contToken
+                                     nextContinuationToken:&nextTok
+                                                     error:&pageErr];
+        [contToken release];
+        contToken = nil;
+        if (!pageTracks) {
             NSString *copiedErr = [pageErr copy];
             [pool release];
             if (page == 0) {
@@ -1031,8 +1105,12 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
         }
 
         NSUInteger beforeCount = [tracks count];
-        el_collect_tracks_recursive(json, tracks, seenIds);
-        NSString *nextTok = el_extract_continuation_token(json);
+        for (ELTrack *t in pageTracks) {
+            if (t && [t.videoId length] > 0 && ![seenIds containsObject:t.videoId]) {
+                [seenIds addObject:t.videoId];
+                [tracks addObject:t];
+            }
+        }
 
         if ([nextTok length] == 0 || [seenTokens containsObject:nextTok] || [tracks count] == beforeCount) {
             [pool release];
@@ -1041,9 +1119,12 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
         [seenTokens addObject:nextTok];
         contToken = [nextTok retain];
         [pool release];
-        [contToken autorelease];
     }
+    [contToken release];
 
+    if ([tracks count] > 0 && ![playlistId isEqualToString:@"VLLM"]) {
+        [self saveCachedTracks:tracks forPlaylistId:playlistId];
+    }
     return tracks;
 }
 

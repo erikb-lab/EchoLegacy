@@ -88,7 +88,9 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
     self = [super init];
     if (self) {
         _tracks = [[NSMutableArray alloc] init];
+        _downloadedIds = [[NSMutableSet alloc] init];
         _pendingQueue = [[NSMutableArray alloc] init];
+        _queuedIds = [[NSMutableSet alloc] init];
         _progressById = [[NSMutableDictionary alloc] init];
         _activeIds = [[NSMutableSet alloc] init];
         _cancelledIds = [[NSMutableSet alloc] init];
@@ -116,7 +118,9 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [_tracks release];
+    [_downloadedIds release];
     [_pendingQueue release];
+    [_queuedIds release];
     [_progressById release];
     [_activeIds release];
     [_cancelledIds release];
@@ -180,10 +184,14 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
     NSFileManager *fm = [NSFileManager defaultManager];
     @synchronized(self) {
         [_tracks removeAllObjects];
+        [_downloadedIds removeAllObjects];
         for (id item in arr) {
             ELTrack *t = [ELTrack trackFromDictionary:item];
-            if (t && [fm fileExistsAtPath:[self localAudioPathForVideoId:t.videoId]]) {
-                [_tracks addObject:t];
+            if (t && [t.videoId length] > 0 && [fm fileExistsAtPath:[self localAudioPathForVideoId:t.videoId]]) {
+                if (![_downloadedIds containsObject:t.videoId]) {
+                    [_tracks addObject:t];
+                    [_downloadedIds addObject:t.videoId];
+                }
             }
         }
     }
@@ -206,11 +214,8 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
 - (BOOL)isDownloaded:(NSString *)videoId {
     if ([videoId length] == 0) return NO;
     @synchronized(self) {
-        for (ELTrack *t in _tracks) {
-            if ([t.videoId isEqualToString:videoId]) return YES;
-        }
+        return [_downloadedIds containsObject:videoId];
     }
-    return NO;
 }
 
 - (BOOL)isDownloading:(NSString *)videoId {
@@ -224,11 +229,8 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
 - (BOOL)isQueued:(NSString *)videoId {
     if ([videoId length] == 0) return NO;
     @synchronized(self) {
-        for (ELTrack *t in _pendingQueue) {
-            if ([t.videoId isEqualToString:videoId]) return YES;
-        }
+        return [_queuedIds containsObject:videoId];
     }
-    return NO;
 }
 
 - (float)progressForVideoId:(NSString *)videoId {
@@ -349,6 +351,7 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
         while ([_activeIds count] < maxConcurrent && [_pendingQueue count] > 0) {
             ELTrack *next = [[[_pendingQueue objectAtIndex:0] retain] autorelease];
             [_pendingQueue removeObjectAtIndex:0];
+            [_queuedIds removeObject:next.videoId];
             if ([_cancelledIds containsObject:next.videoId]) {
                 [_cancelledIds removeObject:next.videoId];
                 continue;
@@ -379,11 +382,16 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
 
 - (void)downloadTrack:(ELTrack *)track {
     if (!track || [track.videoId length] == 0) return;
-    if ([self isDownloaded:track.videoId] || [self isDownloading:track.videoId] || [self isQueued:track.videoId]) return;
 
     @synchronized(self) {
+        if ([_downloadedIds containsObject:track.videoId] ||
+            ([_activeIds containsObject:track.videoId] && ![_cancelledIds containsObject:track.videoId]) ||
+            [_queuedIds containsObject:track.videoId]) {
+            return;
+        }
         [_cancelledIds removeObject:track.videoId];
         [_pendingQueue addObject:track];
+        [_queuedIds addObject:track.videoId];
     }
     [self performSelectorOnMainThread:@selector(postChangedOnMain) withObject:nil waitUntilDone:NO];
     [self pumpQueue];
@@ -395,17 +403,14 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
     @synchronized(self) {
         for (ELTrack *track in tracks) {
             if (!track || [track.videoId length] == 0) continue;
-            BOOL exists = NO;
-            for (ELTrack *d in _tracks) {
-                if ([d.videoId isEqualToString:track.videoId]) { exists = YES; break; }
+            if ([_downloadedIds containsObject:track.videoId] ||
+                [_activeIds containsObject:track.videoId] ||
+                [_queuedIds containsObject:track.videoId]) {
+                continue;
             }
-            if (exists || [_activeIds containsObject:track.videoId]) continue;
-            for (ELTrack *q in _pendingQueue) {
-                if ([q.videoId isEqualToString:track.videoId]) { exists = YES; break; }
-            }
-            if (exists) continue;
             [_cancelledIds removeObject:track.videoId];
             [_pendingQueue addObject:track];
+            [_queuedIds addObject:track.videoId];
             added = YES;
         }
     }
@@ -436,11 +441,7 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
             [seenBatch addObject:track.videoId];
 
             totalCount++;
-            BOOL isDone = NO;
-            for (ELTrack *d in _tracks) {
-                if ([d.videoId isEqualToString:track.videoId]) { isDone = YES; break; }
-            }
-            if (isDone) {
+            if ([_downloadedIds containsObject:track.videoId]) {
                 alreadyCount++;
                 continue;
             }
@@ -448,15 +449,11 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
             [_batchIds addObject:track.videoId];
             [_retryCountById removeObjectForKey:track.videoId];
 
-            BOOL inFlight = [_activeIds containsObject:track.videoId];
-            if (!inFlight) {
-                for (ELTrack *q in _pendingQueue) {
-                    if ([q.videoId isEqualToString:track.videoId]) { inFlight = YES; break; }
-                }
-            }
+            BOOL inFlight = ([_activeIds containsObject:track.videoId] || [_queuedIds containsObject:track.videoId]);
             if (!inFlight) {
                 [_cancelledIds removeObject:track.videoId];
                 [_pendingQueue addObject:track];
+                [_queuedIds addObject:track.videoId];
             }
         }
 
@@ -571,7 +568,7 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
         [_activeIds removeObject:vid];
         [_progressById removeObjectForKey:vid];
         [_cancelledIds removeObject:vid];
-        if (success) {
+        if (success && !wasCancelled) {
             [_retryCountById removeObjectForKey:vid];
             for (NSInteger i = (NSInteger)[_tracks count] - 1; i >= 0; i--) {
                 if ([[[_tracks objectAtIndex:i] videoId] isEqualToString:vid]) {
@@ -579,16 +576,21 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
                 }
             }
             [_tracks insertObject:track atIndex:0];
+            [_downloadedIds addObject:vid];
         } else if (!wasCancelled) {
             NSInteger retries = [[_retryCountById objectForKey:vid] integerValue];
             if (retries < 2) {
                 [_retryCountById setObject:[NSNumber numberWithInteger:retries + 1] forKey:vid];
-                [_pendingQueue addObject:track];
+                if (![_queuedIds containsObject:vid] && ![_downloadedIds containsObject:vid]) {
+                    [_pendingQueue addObject:track];
+                    [_queuedIds addObject:vid];
+                }
                 requeued = YES;
             } else {
                 [_retryCountById removeObjectForKey:vid];
             }
         } else {
+            success = NO;
             [_retryCountById removeObjectForKey:vid];
         }
 
@@ -603,7 +605,11 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
         }
     }
 
-    if (success) [self saveIndex];
+    if (success) {
+        [self saveIndex];
+    } else {
+        [fm removeItemAtPath:finalAudio error:nil];
+    }
     [self performSelectorOnMainThread:@selector(postChangedOnMain) withObject:nil waitUntilDone:NO];
     if (batchUpdated) {
         [self dispatchBatchProgressNotification];
@@ -628,6 +634,7 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
     if ([videoId length] == 0) return;
     @synchronized(self) {
         [_cancelledIds addObject:videoId];
+        [_queuedIds removeObject:videoId];
         [_progressById removeObjectForKey:videoId];
         [_retryCountById removeObjectForKey:videoId];
         [_batchIds removeObject:videoId];
@@ -648,6 +655,7 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
     [fm removeItemAtPath:[self localArtPathForVideoId:videoId] error:nil];
     [[ELLyricsClient sharedClient] deleteCachedLyricsForVideoId:videoId];
     @synchronized(self) {
+        [_downloadedIds removeObject:videoId];
         for (NSInteger i = (NSInteger)[_tracks count] - 1; i >= 0; i--) {
             if ([[[_tracks objectAtIndex:i] videoId] isEqualToString:videoId]) {
                 [_tracks removeObjectAtIndex:i];

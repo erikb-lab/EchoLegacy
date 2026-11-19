@@ -10,6 +10,8 @@
     NSString *_currentVideoId;
     NSString *_currentThumbURL;
     ELTrack *_track;
+    BOOL _isActiveBg;
+    BOOL _bgInitialized;
 }
 
 @property (nonatomic, readonly) NSString *videoId;

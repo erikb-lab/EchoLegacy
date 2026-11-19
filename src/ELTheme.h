@@ -55,6 +55,7 @@
 + (UIImage *)stretchableCardImageWithColor:(UIColor *)color;
 + (UIImage *)roundedRectImageWithSize:(CGSize)size radius:(CGFloat)radius fillColor:(UIColor *)fillColor borderColor:(UIColor *)borderColor;
 + (UIImage *)roundedPlaceholderArtSize:(CGFloat)size radius:(CGFloat)radius;
++ (UIImage *)cachedRoundedThumbnailForSize:(CGFloat)size radius:(CGFloat)radius cacheKey:(NSString *)cacheKey;
 + (UIImage *)roundedThumbnailFromImage:(UIImage *)image size:(CGFloat)size radius:(CGFloat)radius cacheKey:(NSString *)cacheKey;
 + (void)clearThumbnailCache;
 

@@ -1,9 +1,13 @@
 #import "ELImageCache.h"
 #import "ELHTTPClient.h"
+#import "ELDownloadManager.h"
+#import "ELTheme.h"
 #import <CommonCrypto/CommonDigest.h>
 
 /* Lean cap for 128 MB RAM iPod touch 2G — disk cache keeps thumbnails fast without holding bitmaps in RAM */
 #define EL_MAX_MEM_IMAGES 14
+#define EL_MAX_THUMB_WORKERS 2
+#define EL_MAX_THUMB_QUEUE 18
 
 static NSString *el_sha1_hex(NSString *input) {
     const char *cstr = [input UTF8String];
@@ -32,6 +36,8 @@ static NSString *el_sha1_hex(NSString *input) {
         _memCache = [[NSMutableDictionary alloc] init];
         _lruKeys = [[NSMutableArray alloc] init];
         _inFlight = [[NSMutableSet alloc] init];
+        _thumbQueue = [[NSMutableArray alloc] init];
+        _activeThumbWorkers = 0;
 
         NSArray *paths = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
         NSString *caches = ([paths count] > 0) ? [paths objectAtIndex:0] : NSTemporaryDirectory();
@@ -54,6 +60,7 @@ static NSString *el_sha1_hex(NSString *input) {
     [_memCache release];
     [_lruKeys release];
     [_inFlight release];
+    [_thumbQueue release];
     [_diskDir release];
     [super dealloc];
 }
@@ -193,6 +200,127 @@ static NSString *el_sha1_hex(NSString *input) {
                           NSStringFromSelector(action), @"action",
                           nil];
     [NSThread detachNewThreadSelector:@selector(loadWorker:) toTarget:self withObject:info];
+}
+
+- (void)thumbWorkerLoop {
+    NSAutoreleasePool *outerPool = [[NSAutoreleasePool alloc] init];
+    [NSThread setThreadPriority:0.35];
+
+    while (1) {
+        NSAutoreleasePool *innerPool = [[NSAutoreleasePool alloc] init];
+        NSDictionary *req = nil;
+        @synchronized(self) {
+            NSUInteger count = [_thumbQueue count];
+            if (count == 0) {
+                _activeThumbWorkers--;
+                [innerPool release];
+                break;
+            }
+            /* LIFO: pop most recent request so currently visible cells load first during fast scrolling */
+            req = [[_thumbQueue objectAtIndex:count - 1] retain];
+            [_thumbQueue removeObjectAtIndex:count - 1];
+        }
+
+        NSString *urlString = [req objectForKey:@"url"];
+        NSString *videoId = [req objectForKey:@"videoId"];
+        NSString *cacheKey = [req objectForKey:@"cacheKey"];
+        CGFloat size = [[req objectForKey:@"size"] floatValue];
+        CGFloat radius = [[req objectForKey:@"radius"] floatValue];
+        id target = [req objectForKey:@"target"];
+        SEL action = NSSelectorFromString([req objectForKey:@"action"]);
+
+        UIImage *roundedImg = [ELTheme cachedRoundedThumbnailForSize:size radius:radius cacheKey:cacheKey];
+        if (!roundedImg && [videoId length] > 0) {
+            NSString *localKey = [NSString stringWithFormat:@"local:%@", videoId];
+            roundedImg = [ELTheme cachedRoundedThumbnailForSize:size radius:radius cacheKey:localKey];
+        }
+
+        if (!roundedImg) {
+            UIImage *rawImg = nil;
+            if ([videoId length] > 0 && [[ELDownloadManager sharedManager] isDownloaded:videoId]) {
+                rawImg = [[ELDownloadManager sharedManager] localArtImageForVideoId:videoId];
+            }
+            if (!rawImg && [urlString length] > 0) {
+                rawImg = [self cachedImageForURL:urlString];
+                if (!rawImg) {
+                    NSData *data = [self downloadImageDataSyncForURL:urlString];
+                    if (data) {
+                        rawImg = [UIImage imageWithData:data];
+                        if (rawImg) {
+                            [self storeInMemory:rawImg forKey:urlString];
+                        }
+                    }
+                }
+            }
+            if (rawImg) {
+                roundedImg = [ELTheme roundedThumbnailFromImage:rawImg size:size radius:radius cacheKey:cacheKey];
+            }
+        }
+
+        if (roundedImg && target && [target respondsToSelector:action]) {
+            NSDictionary *res = [NSDictionary dictionaryWithObjectsAndKeys:
+                                 (cacheKey ? cacheKey : @""), @"cacheKey",
+                                 (videoId ? videoId : @""), @"videoId",
+                                 (urlString ? urlString : @""), @"url",
+                                 roundedImg, @"image",
+                                 nil];
+            [target performSelectorOnMainThread:action withObject:res waitUntilDone:NO];
+        }
+
+        [req release];
+        [innerPool release];
+    }
+
+    [outerPool release];
+}
+
+- (void)loadRoundedThumbnailForURL:(NSString *)urlString
+                           videoId:(NSString *)videoId
+                              size:(CGFloat)size
+                            radius:(CGFloat)radius
+                            target:(id)target
+                            action:(SEL)action {
+    if (!target || !action) return;
+    NSString *safeURL = (urlString ? urlString : @"");
+    NSString *safeVid = (videoId ? videoId : @"");
+    if ([safeURL length] == 0 && [safeVid length] == 0) return;
+
+    NSString *cacheKey = ([safeURL length] > 0)
+        ? safeURL
+        : [NSString stringWithFormat:@"local:%@", safeVid];
+
+    NSDictionary *req = [NSDictionary dictionaryWithObjectsAndKeys:
+                         cacheKey, @"cacheKey",
+                         safeURL, @"url",
+                         safeVid, @"videoId",
+                         [NSNumber numberWithFloat:(float)size], @"size",
+                         [NSNumber numberWithFloat:(float)radius], @"radius",
+                         target, @"target",
+                         NSStringFromSelector(action), @"action",
+                         nil];
+
+    BOOL spawnWorker = NO;
+    @synchronized(self) {
+        /* Drop any stale pending request for this reused cell target */
+        for (NSInteger i = (NSInteger)[_thumbQueue count] - 1; i >= 0; i--) {
+            NSDictionary *item = [_thumbQueue objectAtIndex:(NSUInteger)i];
+            if ([item objectForKey:@"target"] == target) {
+                [_thumbQueue removeObjectAtIndex:(NSUInteger)i];
+            }
+        }
+        if ([_thumbQueue count] >= EL_MAX_THUMB_QUEUE) {
+            [_thumbQueue removeObjectAtIndex:0];
+        }
+        [_thumbQueue addObject:req];
+        if (_activeThumbWorkers < EL_MAX_THUMB_WORKERS) {
+            _activeThumbWorkers++;
+            spawnWorker = YES;
+        }
+    }
+
+    if (spawnWorker) {
+        [NSThread detachNewThreadSelector:@selector(thumbWorkerLoop) toTarget:self withObject:nil];
+    }
 }
 
 @end

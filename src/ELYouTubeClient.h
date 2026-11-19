@@ -40,6 +40,12 @@ extern NSString *const ELLibraryUpdatedNotification;
 - (void)invalidateCachedStreamForVideoId:(NSString *)videoId;
 - (BOOL)syncLibraryWithError:(NSString **)outError;
 - (NSArray *)fetchTracksForPlaylistId:(NSString *)playlistId error:(NSString **)outError;
+- (NSArray *)fetchPlaylistPageForId:(NSString *)playlistId
+                  continuationToken:(NSString *)contToken
+              nextContinuationToken:(NSString **)outNextToken
+                              error:(NSString **)outError;
+- (NSArray *)cachedTracksForPlaylistId:(NSString *)playlistId;
+- (void)saveCachedTracks:(NSArray *)tracks forPlaylistId:(NSString *)playlistId;
 - (BOOL)isTrackLiked:(NSString *)videoId;
 - (BOOL)setLiked:(BOOL)liked forTrack:(ELTrack *)track error:(NSString **)outError;
 - (void)clearLibraryCache;

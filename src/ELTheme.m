@@ -2,7 +2,7 @@
 #include <math.h>
 #include <string.h>
 
-#define EL_MAX_ROUNDED_THUMBS 24
+#define EL_MAX_ROUNDED_THUMBS 128
 
 static NSMutableDictionary *g_icon_cache = nil;
 static NSMutableDictionary *g_thumb_cache = nil;
@@ -52,14 +52,19 @@ static NSString *el_icon_key(NSString *name, CGFloat size, UIColor *color) {
 }
 
 static UIImage *el_cached_icon(NSString *key) {
-    if (!g_icon_cache) g_icon_cache = [[NSMutableDictionary alloc] init];
-    return [g_icon_cache objectForKey:key];
+    @synchronized([ELTheme class]) {
+        if (!g_icon_cache) g_icon_cache = [[NSMutableDictionary alloc] init];
+        UIImage *img = [g_icon_cache objectForKey:key];
+        return img ? [[img retain] autorelease] : nil;
+    }
 }
 
 static UIImage *el_store_icon(NSString *key, UIImage *img) {
-    if (!g_icon_cache) g_icon_cache = [[NSMutableDictionary alloc] init];
-    if (img && key) [g_icon_cache setObject:img forKey:key];
-    return img;
+    @synchronized([ELTheme class]) {
+        if (!g_icon_cache) g_icon_cache = [[NSMutableDictionary alloc] init];
+        if (img && key) [g_icon_cache setObject:img forKey:key];
+        return img;
+    }
 }
 
 static void el_add_rounded_rect_path(CGContextRef ctx, CGRect rect, CGFloat radius) {
@@ -997,23 +1002,27 @@ static CGFloat el_clampf(CGFloat v, CGFloat lo, CGFloat hi) {
 }
 
 + (void)clearThumbnailCache {
-    [g_thumb_cache removeAllObjects];
-    [g_thumb_lru removeAllObjects];
+    @synchronized(self) {
+        [g_thumb_cache removeAllObjects];
+        [g_thumb_lru removeAllObjects];
+    }
 }
 
 + (void)ensureThumbCacheReady {
-    if (!g_thumb_cache) g_thumb_cache = [[NSMutableDictionary alloc] initWithCapacity:EL_MAX_ROUNDED_THUMBS];
-    if (!g_thumb_lru) g_thumb_lru = [[NSMutableArray alloc] initWithCapacity:EL_MAX_ROUNDED_THUMBS];
-    if (!g_thumb_observer_registered) {
-        g_thumb_observer_registered = YES;
-        [[NSNotificationCenter defaultCenter] addObserver:self
-                                                 selector:@selector(clearThumbnailCache)
-                                                     name:UIApplicationDidReceiveMemoryWarningNotification
-                                                   object:nil];
-        [[NSNotificationCenter defaultCenter] addObserver:self
-                                                 selector:@selector(clearThumbnailCache)
-                                                     name:UIApplicationDidEnterBackgroundNotification
-                                                   object:nil];
+    @synchronized(self) {
+        if (!g_thumb_cache) g_thumb_cache = [[NSMutableDictionary alloc] initWithCapacity:EL_MAX_ROUNDED_THUMBS];
+        if (!g_thumb_lru) g_thumb_lru = [[NSMutableArray alloc] initWithCapacity:EL_MAX_ROUNDED_THUMBS];
+        if (!g_thumb_observer_registered) {
+            g_thumb_observer_registered = YES;
+            [[NSNotificationCenter defaultCenter] addObserver:self
+                                                     selector:@selector(clearThumbnailCache)
+                                                         name:UIApplicationDidReceiveMemoryWarningNotification
+                                                       object:nil];
+            [[NSNotificationCenter defaultCenter] addObserver:self
+                                                     selector:@selector(clearThumbnailCache)
+                                                         name:UIApplicationDidEnterBackgroundNotification
+                                                       object:nil];
+        }
     }
 }
 
@@ -1022,64 +1031,131 @@ static CGFloat el_clampf(CGFloat v, CGFloat lo, CGFloat hi) {
     UIImage *c = el_cached_icon(k);
     if (c) return c;
     UIImage *base = [self placeholderArtImage];
-    UIGraphicsBeginImageContext(CGSizeMake(size, size));
-    CGContextRef ctx = UIGraphicsGetCurrentContext();
-    el_add_rounded_rect_path(ctx, CGRectMake(0.0f, 0.0f, size, size), radius);
+    CGImageRef cgImg = [base CGImage];
+    size_t px = (size_t)(size + 0.5f);
+    if (px == 0) px = 1;
+    CGFloat fSize = (CGFloat)px;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    if (!cs || !cgImg) {
+        if (cs) CGColorSpaceRelease(cs);
+        return base;
+    }
+    CGContextRef ctx = CGBitmapContextCreate(NULL,
+                                             px,
+                                             px,
+                                             8,
+                                             px * 4,
+                                             cs,
+                                             kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Host);
+    CGColorSpaceRelease(cs);
+    if (!ctx) return base;
+    CGContextClearRect(ctx, CGRectMake(0.0f, 0.0f, fSize, fSize));
+    el_add_rounded_rect_path(ctx, CGRectMake(0.0f, 0.0f, fSize, fSize), radius);
     CGContextClip(ctx);
-    [base drawInRect:CGRectMake(0.0f, 0.0f, size, size)];
-    UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
-    UIGraphicsEndImageContext();
-    return el_store_icon(k, img);
+    CGContextSetInterpolationQuality(ctx, kCGInterpolationMedium);
+    CGContextDrawImage(ctx, CGRectMake(0.0f, 0.0f, fSize, fSize), cgImg);
+    CGImageRef cgOut = CGBitmapContextCreateImage(ctx);
+    CGContextRelease(ctx);
+    UIImage *img = nil;
+    if (cgOut) {
+        img = [UIImage imageWithCGImage:cgOut];
+        CGImageRelease(cgOut);
+    }
+    return el_store_icon(k, img ? img : base);
+}
+
++ (UIImage *)cachedRoundedThumbnailForSize:(CGFloat)size radius:(CGFloat)radius cacheKey:(NSString *)cacheKey {
+    if ([cacheKey length] == 0 || size <= 0.0f) {
+        return nil;
+    }
+    [self ensureThumbCacheReady];
+    NSString *fullKey = [NSString stringWithFormat:@"%d_%d_%@", (int)(size + 0.5f), (int)(radius + 0.5f), cacheKey];
+    @synchronized(self) {
+        UIImage *hit = [g_thumb_cache objectForKey:fullKey];
+        if (hit) {
+            [[hit retain] autorelease];
+            [g_thumb_lru removeObject:fullKey];
+            [g_thumb_lru addObject:fullKey];
+            return hit;
+        }
+    }
+    return nil;
 }
 
 + (UIImage *)roundedThumbnailFromImage:(UIImage *)image size:(CGFloat)size radius:(CGFloat)radius cacheKey:(NSString *)cacheKey {
     if (!image || size <= 0.0f) {
         return [self roundedPlaceholderArtSize:size radius:radius];
     }
-    CGSize srcSize = image.size;
-    if (srcSize.width <= 0.0f || srcSize.height <= 0.0f) {
+    CGImageRef cgImg = [image CGImage];
+    if (!cgImg) {
+        return [self roundedPlaceholderArtSize:size radius:radius];
+    }
+    CGFloat srcW = (CGFloat)CGImageGetWidth(cgImg);
+    CGFloat srcH = (CGFloat)CGImageGetHeight(cgImg);
+    if (srcW <= 0.0f || srcH <= 0.0f) {
         return [self roundedPlaceholderArtSize:size radius:radius];
     }
 
-    [self ensureThumbCacheReady];
-
-    NSString *fullKey = nil;
-    if ([cacheKey length] > 0) {
-        fullKey = [NSString stringWithFormat:@"%d_%d_%@", (int)(size + 0.5f), (int)(radius + 0.5f), cacheKey];
-        UIImage *hit = [g_thumb_cache objectForKey:fullKey];
-        if (hit) {
-            [g_thumb_lru removeObject:fullKey];
-            [g_thumb_lru addObject:fullKey];
-            return hit;
-        }
+    UIImage *cachedHit = [self cachedRoundedThumbnailForSize:size radius:radius cacheKey:cacheKey];
+    if (cachedHit) {
+        return cachedHit;
     }
 
-    /* Aspect-fill center crop + rounded clip in one CPU pass (eliminates GPU offscreen FBO while scrolling) */
-    CGFloat scaleX = size / srcSize.width;
-    CGFloat scaleY = size / srcSize.height;
-    CGFloat scale = (scaleX > scaleY) ? scaleX : scaleY;
-    CGFloat drawW = srcSize.width * scale;
-    CGFloat drawH = srcSize.height * scale;
-    CGFloat drawX = (size - drawW) * 0.5f;
-    CGFloat drawY = (size - drawH) * 0.5f;
+    size_t px = (size_t)(size + 0.5f);
+    if (px == 0) px = 1;
+    CGFloat fSize = (CGFloat)px;
 
-    UIGraphicsBeginImageContext(CGSizeMake(size, size));
-    CGContextRef ctx = UIGraphicsGetCurrentContext();
-    el_add_rounded_rect_path(ctx, CGRectMake(0.0f, 0.0f, size, size), radius);
+    /* Aspect-fill center crop + rounded clip in one pure CoreGraphics pass (100% thread-safe on any worker thread) */
+    CGFloat scaleX = fSize / srcW;
+    CGFloat scaleY = fSize / srcH;
+    CGFloat scale = (scaleX > scaleY) ? scaleX : scaleY;
+    CGFloat drawW = srcW * scale;
+    CGFloat drawH = srcH * scale;
+    CGFloat drawX = (fSize - drawW) * 0.5f;
+    CGFloat drawY = (fSize - drawH) * 0.5f;
+
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    if (!cs) {
+        return [self roundedPlaceholderArtSize:size radius:radius];
+    }
+    CGContextRef ctx = CGBitmapContextCreate(NULL,
+                                             px,
+                                             px,
+                                             8,
+                                             px * 4,
+                                             cs,
+                                             kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Host);
+    CGColorSpaceRelease(cs);
+    if (!ctx) {
+        return [self roundedPlaceholderArtSize:size radius:radius];
+    }
+
+    CGContextClearRect(ctx, CGRectMake(0.0f, 0.0f, fSize, fSize));
+    el_add_rounded_rect_path(ctx, CGRectMake(0.0f, 0.0f, fSize, fSize), radius);
     CGContextClip(ctx);
     CGContextSetInterpolationQuality(ctx, kCGInterpolationMedium);
-    [image drawInRect:CGRectMake(drawX, drawY, drawW, drawH)];
-    UIImage *out = UIGraphicsGetImageFromCurrentImageContext();
-    UIGraphicsEndImageContext();
+    CGContextDrawImage(ctx, CGRectMake(drawX, drawY, drawW, drawH), cgImg);
 
-    if (out && fullKey) {
-        [g_thumb_cache setObject:out forKey:fullKey];
-        [g_thumb_lru removeObject:fullKey];
-        [g_thumb_lru addObject:fullKey];
-        while ([g_thumb_lru count] > EL_MAX_ROUNDED_THUMBS) {
-            NSString *evict = [g_thumb_lru objectAtIndex:0];
-            [g_thumb_cache removeObjectForKey:evict];
-            [g_thumb_lru removeObjectAtIndex:0];
+    CGImageRef cgOut = CGBitmapContextCreateImage(ctx);
+    CGContextRelease(ctx);
+
+    UIImage *out = nil;
+    if (cgOut) {
+        out = [UIImage imageWithCGImage:cgOut];
+        CGImageRelease(cgOut);
+    }
+
+    if (out && [cacheKey length] > 0) {
+        NSString *fullKey = [NSString stringWithFormat:@"%d_%d_%@", (int)(size + 0.5f), (int)(radius + 0.5f), cacheKey];
+        @synchronized(self) {
+            [g_thumb_cache setObject:out forKey:fullKey];
+            [g_thumb_lru removeObject:fullKey];
+            [g_thumb_lru addObject:fullKey];
+            while ([g_thumb_lru count] > EL_MAX_ROUNDED_THUMBS) {
+                NSString *evict = [g_thumb_lru objectAtIndex:0];
+                [g_thumb_cache removeObjectForKey:evict];
+                [g_thumb_lru removeObjectAtIndex:0];
+            }
         }
     }
     return out ? out : [self roundedPlaceholderArtSize:size radius:radius];

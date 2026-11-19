@@ -57,6 +57,9 @@
         _downloadBtn.titleLabel.font = [UIFont boldSystemFontOfSize:10.0f];
         [_downloadBtn addTarget:self action:@selector(onDownloadTapped) forControlEvents:UIControlEventTouchUpInside];
         [self.contentView addSubview:_downloadBtn];
+
+        _isActiveBg = NO;
+        _bgInitialized = YES;
     }
     return self;
 }
@@ -74,6 +77,11 @@
 }
 
 - (void)applyOpaqueBackgroundActive:(BOOL)active {
+    if (_bgInitialized && _isActiveBg == active) {
+        return;
+    }
+    _bgInitialized = YES;
+    _isActiveBg = active;
     UIColor *cardBg = active ? [ELTheme surfaceHighlightColor] : [ELTheme surfaceColor];
     _cardBgView.image = [ELTheme stretchableCardImageWithColor:cardBg];
     _titleLabel.backgroundColor = cardBg;
@@ -109,39 +117,47 @@
     [self applyOpaqueBackgroundActive:(self.selected || self.highlighted)];
     [self refreshDownloadState];
 
-    /* Load album art: pre-clipped 46x46 rounded bitmap from local offline art or async TLS cache */
-    UIImage *localArt = [[ELDownloadManager sharedManager] localArtImageForVideoId:track.videoId];
-    if (localArt) {
-        NSString *localKey = [NSString stringWithFormat:@"local:%@", track.videoId];
-        _artView.image = [ELTheme roundedThumbnailFromImage:localArt size:46.0f radius:6.0f cacheKey:localKey];
-        [_currentThumbURL release];
-        _currentThumbURL = nil;
-        return;
-    }
-
+    /* O(1) RAM-only rounded thumbnail lookup: zero main-thread disk stat(), JPEG decode, or CG context render */
     NSString *url = ([track.thumbURL length] > 0) ? track.thumbURL : track.artURL;
     [_currentThumbURL release];
     _currentThumbURL = [url copy];
 
-    if ([url length] == 0) {
-        _artView.image = [ELTheme roundedPlaceholderArtSize:46.0f radius:6.0f];
+    NSString *localKey = ([track.videoId length] > 0)
+        ? [NSString stringWithFormat:@"local:%@", track.videoId]
+        : @"";
+    NSString *cacheKey = ([url length] > 0) ? url : localKey;
+
+    UIImage *hit = nil;
+    if ([cacheKey length] > 0) {
+        hit = [ELTheme cachedRoundedThumbnailForSize:46.0f radius:6.0f cacheKey:cacheKey];
+    }
+    if (!hit && [localKey length] > 0 && ![localKey isEqualToString:cacheKey]) {
+        hit = [ELTheme cachedRoundedThumbnailForSize:46.0f radius:6.0f cacheKey:localKey];
+    }
+
+    if (hit) {
+        _artView.image = hit;
         return;
     }
 
-    UIImage *cached = [[ELImageCache sharedCache] cachedImageForURL:url];
-    if (cached) {
-        _artView.image = [ELTheme roundedThumbnailFromImage:cached size:46.0f radius:6.0f cacheKey:url];
-    } else {
-        _artView.image = [ELTheme roundedPlaceholderArtSize:46.0f radius:6.0f];
-        [[ELImageCache sharedCache] loadImageForURL:url target:self action:@selector(onArtLoaded:)];
-    }
+    _artView.image = [ELTheme roundedPlaceholderArtSize:46.0f radius:6.0f];
+    [[ELImageCache sharedCache] loadRoundedThumbnailForURL:url
+                                                   videoId:track.videoId
+                                                      size:46.0f
+                                                    radius:6.0f
+                                                    target:self
+                                                    action:@selector(onArtLoaded:)];
 }
 
 - (void)onArtLoaded:(NSDictionary *)info {
-    NSString *url = [info objectForKey:@"url"];
     UIImage *img = [info objectForKey:@"image"];
-    if (img && _currentThumbURL && [_currentThumbURL isEqualToString:url]) {
-        _artView.image = [ELTheme roundedThumbnailFromImage:img size:46.0f radius:6.0f cacheKey:url];
+    if (!img) return;
+    NSString *vid = [info objectForKey:@"videoId"];
+    NSString *url = [info objectForKey:@"url"];
+    BOOL matchVid = ([_currentVideoId length] > 0 && [vid length] > 0 && [_currentVideoId isEqualToString:vid]);
+    BOOL matchUrl = ([_currentThumbURL length] > 0 && [url length] > 0 && [_currentThumbURL isEqualToString:url]);
+    if (matchVid || matchUrl) {
+        _artView.image = img;
     }
 }
 

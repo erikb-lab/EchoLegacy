@@ -7,7 +7,9 @@ extern NSString *const ELDownloadBatchProgressNotification; /* userInfo: title, 
 
 @interface ELDownloadManager : NSObject {
     NSMutableArray *_tracks;
+    NSMutableSet *_downloadedIds;
     NSMutableArray *_pendingQueue;
+    NSMutableSet *_queuedIds;
     NSMutableDictionary *_progressById;
     NSMutableSet *_activeIds;
     NSMutableSet *_cancelledIds;

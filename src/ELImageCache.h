@@ -4,6 +4,8 @@
     NSMutableDictionary *_memCache;
     NSMutableArray *_lruKeys;
     NSMutableSet *_inFlight;
+    NSMutableArray *_thumbQueue;
+    NSInteger _activeThumbWorkers;
     NSString *_diskDir;
 }
 
@@ -14,6 +16,14 @@
 
 /* Loads image asynchronously over TLS 1.2 if needed and calls target/selector on main thread with NSDictionary {url, image} */
 - (void)loadImageForURL:(NSString *)urlString target:(id)target action:(SEL)action;
+
+/* Bounded LIFO async loader + off-main-thread rounded thumbnail renderer for table cells */
+- (void)loadRoundedThumbnailForURL:(NSString *)urlString
+                           videoId:(NSString *)videoId
+                              size:(CGFloat)size
+                            radius:(CGFloat)radius
+                            target:(id)target
+                            action:(SEL)action;
 
 /* Synchronously fetches and returns raw JPEG bytes (for offline download storage) */
 - (NSData *)downloadImageDataSyncForURL:(NSString *)urlString;
