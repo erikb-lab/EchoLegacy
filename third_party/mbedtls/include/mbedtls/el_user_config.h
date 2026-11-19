@@ -1,0 +1,103 @@
+#ifndef EL_MBEDTLS_USER_CONFIG_H
+#define EL_MBEDTLS_USER_CONFIG_H
+
+/*
+ * EchoLegacy armv6 (ARM1176JZF-S, iOS 4.1, 128 MB RAM) mbedTLS 2.28 configuration.
+ * Retains full TLS 1.2 client compatibility for Google / YouTube / googlevideo.com
+ * (RSA + ECDSA certs, ECDHE-ECDSA / ECDHE-RSA / RSA key exchange, P-256/P-384/P-521/X25519,
+ * AES-128/256-GCM, ChaCha20-Poly1305, AES-CBC, SHA-1/256/384/512, SNI, Session Tickets)
+ * while trimming unused server/DTLS/legacy ciphers and shrinking per-connection RAM.
+ */
+
+/* 1. Per-connection TLS buffer & cert RAM savings + pthread safety for shared CA chain (128 MB RAM budget) */
+#define MBEDTLS_SSL_IN_CONTENT_LEN              16384
+#define MBEDTLS_SSL_OUT_CONTENT_LEN             4096
+#undef  MBEDTLS_SSL_KEEP_PEER_CERTIFICATE
+#define MBEDTLS_THREADING_C
+#define MBEDTLS_THREADING_PTHREAD
+
+/* 2. ARM1176JZF-S (16 KB L1 I-cache / 16 KB L1 D-cache) table & code footprint optimizations */
+#define MBEDTLS_AES_ROM_TABLES
+#define MBEDTLS_AES_FEWER_TABLES
+#define MBEDTLS_SHA256_SMALLER
+#define MBEDTLS_SHA512_SMALLER
+
+/* 3. Client-only TLS 1.2: disable TLS server, DTLS, and legacy SSLv3/TLS 1.0/1.1 */
+#undef  MBEDTLS_SSL_SRV_C
+#undef  MBEDTLS_SSL_COOKIE_C
+#undef  MBEDTLS_SSL_TICKET_C
+#undef  MBEDTLS_SSL_CACHE_C
+#undef  MBEDTLS_SSL_PROTO_SSL3
+#undef  MBEDTLS_SSL_PROTO_TLS1
+#undef  MBEDTLS_SSL_PROTO_TLS1_1
+#undef  MBEDTLS_SSL_PROTO_DTLS
+#undef  MBEDTLS_SSL_DTLS_ANTI_REPLAY
+#undef  MBEDTLS_SSL_DTLS_HELLO_VERIFY
+#undef  MBEDTLS_SSL_DTLS_CLIENT_PORT_REUSE
+#undef  MBEDTLS_SSL_DTLS_BADMAC_LIMIT
+#undef  MBEDTLS_SSL_DTLS_CONNECTION_ID
+#undef  MBEDTLS_SSL_CBC_RECORD_SPLITTING
+
+/* 4. Disable unused key exchanges (keep ECDHE_ECDSA, ECDHE_RSA, RSA) */
+#undef  MBEDTLS_KEY_EXCHANGE_DHE_RSA_ENABLED
+#undef  MBEDTLS_KEY_EXCHANGE_PSK_ENABLED
+#undef  MBEDTLS_KEY_EXCHANGE_DHE_PSK_ENABLED
+#undef  MBEDTLS_KEY_EXCHANGE_RSA_PSK_ENABLED
+#undef  MBEDTLS_KEY_EXCHANGE_ECDHE_PSK_ENABLED
+#undef  MBEDTLS_KEY_EXCHANGE_ECDH_ECDSA_ENABLED
+#undef  MBEDTLS_KEY_EXCHANGE_ECDH_RSA_ENABLED
+#undef  MBEDTLS_KEY_EXCHANGE_ECJPAKE_ENABLED
+#undef  MBEDTLS_DHM_C
+#undef  MBEDTLS_ECJPAKE_C
+
+/* 5. Disable unused elliptic curves (keep SECP256R1, SECP384R1, SECP521R1, CURVE25519) */
+#undef  MBEDTLS_ECP_DP_SECP192R1_ENABLED
+#undef  MBEDTLS_ECP_DP_SECP224R1_ENABLED
+#undef  MBEDTLS_ECP_DP_SECP192K1_ENABLED
+#undef  MBEDTLS_ECP_DP_SECP224K1_ENABLED
+#undef  MBEDTLS_ECP_DP_SECP256K1_ENABLED
+#undef  MBEDTLS_ECP_DP_BP256R1_ENABLED
+#undef  MBEDTLS_ECP_DP_BP384R1_ENABLED
+#undef  MBEDTLS_ECP_DP_BP512R1_ENABLED
+#undef  MBEDTLS_ECP_DP_CURVE448_ENABLED
+
+/* 6. Disable legacy/unused symmetric ciphers & modes (keep AES, GCM, CBC, CTR, ChaCha20-Poly1305) */
+#undef  MBEDTLS_ARC4_C
+#undef  MBEDTLS_BLOWFISH_C
+#undef  MBEDTLS_CAMELLIA_C
+#undef  MBEDTLS_ARIA_C
+#undef  MBEDTLS_DES_C
+#undef  MBEDTLS_XTEA_C
+#undef  MBEDTLS_CCM_C
+#undef  MBEDTLS_CMAC_C
+#undef  MBEDTLS_NIST_KW_C
+#undef  MBEDTLS_CIPHER_MODE_CFB
+#undef  MBEDTLS_CIPHER_MODE_OFB
+#undef  MBEDTLS_CIPHER_MODE_XTS
+
+/* 7. Disable legacy message digests (keep SHA-1, SHA-256, SHA-384/512) */
+#undef  MBEDTLS_MD2_C
+#undef  MBEDTLS_MD4_C
+#undef  MBEDTLS_MD5_C
+#undef  MBEDTLS_RIPEMD160_C
+
+/* 8. Disable self-tests, embedded test certs, X.509 writing/CSR/CRL, debug strings, PSA subsystem */
+#undef  MBEDTLS_SELF_TEST
+#undef  MBEDTLS_CERTS_C
+#undef  MBEDTLS_DEBUG_C
+#undef  MBEDTLS_VERSION_FEATURES
+#undef  MBEDTLS_X509_CRL_PARSE_C
+#undef  MBEDTLS_X509_CSR_PARSE_C
+#undef  MBEDTLS_X509_CREATE_C
+#undef  MBEDTLS_X509_CRT_WRITE_C
+#undef  MBEDTLS_X509_CSR_WRITE_C
+#undef  MBEDTLS_PEM_WRITE_C
+#undef  MBEDTLS_PK_WRITE_C
+#undef  MBEDTLS_PKCS5_C
+#undef  MBEDTLS_PKCS12_C
+#undef  MBEDTLS_PSA_CRYPTO_C
+#undef  MBEDTLS_PSA_CRYPTO_SE_C
+#undef  MBEDTLS_PSA_CRYPTO_STORAGE_C
+#undef  MBEDTLS_PSA_ITS_FILE_C
+
+#endif /* EL_MBEDTLS_USER_CONFIG_H */
