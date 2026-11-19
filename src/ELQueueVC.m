@@ -1,6 +1,9 @@
 #import "ELQueueVC.h"
 #import "ELAudioEngine.h"
+#import "ELFeatures.h"
+#if EL_FEATURE_DOWNLOADS
 #import "ELDownloadManager.h"
+#endif
 #import "ELTheme.h"
 #import "ELTrackCell.h"
 
@@ -57,9 +60,12 @@
     [ELTheme styleTableView:_tableView];
     [self.view addSubview:_tableView];
 
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refresh) name:ELPlayerStateChangedNotification object:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onDownloadsChanged) name:ELDownloadsChangedNotification object:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onDownloadProgress:) name:ELDownloadProgressNotification object:nil];
+    NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+    [nc addObserver:self selector:@selector(refresh) name:ELPlayerStateChangedNotification object:nil];
+#if EL_FEATURE_DOWNLOADS
+    [nc addObserver:self selector:@selector(onDownloadsChanged) name:ELDownloadsChangedNotification object:nil];
+    [nc addObserver:self selector:@selector(onDownloadProgress:) name:ELDownloadProgressNotification object:nil];
+#endif
 
     [self refresh];
 }
@@ -72,14 +78,13 @@
     [[ELAudioEngine sharedEngine] toggleShuffle];
 }
 
+#if EL_FEATURE_DOWNLOADS
 - (void)refreshVisibleCellsForVideoId:(NSString *)videoId {
-    NSArray *cells = [_tableView visibleCells];
-    for (UITableViewCell *cell in cells) {
-        if ([cell isKindOfClass:[ELTrackCell class]]) {
-            ELTrackCell *tc = (ELTrackCell *)cell;
-            if (!videoId || [tc.videoId isEqualToString:videoId]) {
-                [tc refreshDownloadState];
-            }
+    for (UITableViewCell *cell in [_tableView visibleCells]) {
+        if (![cell isKindOfClass:[ELTrackCell class]]) continue;
+        ELTrackCell *tc = (ELTrackCell *)cell;
+        if (!videoId || [tc.videoId isEqualToString:videoId]) {
+            [tc refreshDownloadState];
         }
     }
 }
@@ -92,6 +97,7 @@
     NSString *vid = [[note userInfo] objectForKey:@"videoId"];
     [self refreshVisibleCellsForVideoId:vid];
 }
+#endif
 
 - (void)refresh {
     ELAudioEngine *eng = [ELAudioEngine sharedEngine];

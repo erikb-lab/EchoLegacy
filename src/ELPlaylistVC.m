@@ -1,8 +1,10 @@
 #import "ELPlaylistVC.h"
 #import "ELAudioEngine.h"
+#if EL_FEATURE_DOWNLOADS
 #import "ELDownloadManager.h"
+#endif
 #import "ELTheme.h"
-#import "ELTrackCell.h"
+#import "ELTrackListHelper.h"
 #import "ELYouTubeClient.h"
 
 @implementation ELPlaylistVC
@@ -25,7 +27,9 @@
     [_spinner release]; _spinner = nil;
     [_statusLabel release]; _statusLabel = nil;
     [_headerInfoLabel release]; _headerInfoLabel = nil;
+#if EL_FEATURE_DOWNLOADS
     [_downloadPlaylistBtn release]; _downloadPlaylistBtn = nil;
+#endif
 }
 
 - (void)viewDidUnload {
@@ -53,34 +57,27 @@
     [super viewDidLoad];
     self.view.backgroundColor = [ELTheme backgroundColor];
 
-    _tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStylePlain];
-    _tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    _tableView.dataSource = self;
-    _tableView.delegate = self;
-    _tableView.rowHeight = 62.0f;
-    _tableView.contentInset = UIEdgeInsetsMake(0, 0, 56, 0);
-    _tableView.scrollIndicatorInsets = _tableView.contentInset;
-    [ELTheme styleTableView:_tableView];
+    _tableView = [[ELTrackListHelper createTrackTableViewWithFrame:self.view.bounds
+                                                          delegate:self
+                                                         rowHeight:62.0f] retain];
     [self.view addSubview:_tableView];
 
-    _spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleWhiteLarge];
-    _spinner.center = CGPointMake(160, 170);
-    _spinner.hidesWhenStopped = YES;
+    _spinner = [[ELTrackListHelper createSpinnerAtCenter:CGPointMake(160.0f, 170.0f)] retain];
     [self.view addSubview:_spinner];
 
-    _statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(24, 200, 272, 44)];
-    _statusLabel.backgroundColor = [UIColor clearColor];
-    _statusLabel.textAlignment = UITextAlignmentCenter;
-    _statusLabel.numberOfLines = 2;
-    _statusLabel.font = [UIFont systemFontOfSize:13.0f];
-    _statusLabel.textColor = [ELTheme textSecondaryColor];
+    _statusLabel = [[ELTrackListHelper createEmptyLabelWithFrame:CGRectMake(24.0f, 200.0f, 272.0f, 44.0f)
+                                                            text:nil
+                                                        fontSize:13.0f
+                                                           lines:2] retain];
     _statusLabel.hidden = YES;
     [self.view addSubview:_statusLabel];
 
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reloadCells) name:ELPlayerStateChangedNotification object:nil];
+#if EL_FEATURE_DOWNLOADS
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onDownloadsChanged) name:ELDownloadsChangedNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onDownloadProgress:) name:ELDownloadProgressNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onBatchProgress) name:ELDownloadBatchProgressNotification object:nil];
+#endif
 
     /* 1. Instant 0.0s render if playlist is cached on disk */
     NSArray *cached = [[ELYouTubeClient sharedClient] cachedTracksForPlaylistId:_playlist.playlistId];
@@ -108,18 +105,7 @@
     [_tableView reloadData];
 }
 
-- (void)refreshVisibleCellsForVideoId:(NSString *)videoId {
-    NSArray *cells = [_tableView visibleCells];
-    for (UITableViewCell *cell in cells) {
-        if ([cell isKindOfClass:[ELTrackCell class]]) {
-            ELTrackCell *tc = (ELTrackCell *)cell;
-            if (!videoId || [tc.videoId isEqualToString:videoId]) {
-                [tc refreshDownloadState];
-            }
-        }
-    }
-}
-
+#if EL_FEATURE_DOWNLOADS
 - (BOOL)allTracksDownloaded {
     if ([_tracks count] == 0) return NO;
     ELDownloadManager *dm = [ELDownloadManager sharedManager];
@@ -132,44 +118,40 @@
 - (void)updateDownloadButtonState {
     if (!_downloadPlaylistBtn) return;
     ELDownloadManager *dm = [ELDownloadManager sharedManager];
+    NSString *title = @"Download Playlist";
+    UIColor *fill = [ELTheme surfaceHighlightColor];
     if (dm.isBatchDownloading && dm.batchTotal > 0) {
-        NSString *lbl = [NSString stringWithFormat:@"Cancel (%ld/%ld)", (long)dm.batchCompleted, (long)dm.batchTotal];
-        [_downloadPlaylistBtn setTitle:lbl forState:UIControlStateNormal];
-        UIImage *bg = [ELTheme roundedRectImageWithSize:_downloadPlaylistBtn.frame.size
-                                                  radius:18.0f
-                                               fillColor:[ELTheme accentColor]
-                                             borderColor:nil];
-        [_downloadPlaylistBtn setBackgroundImage:bg forState:UIControlStateNormal];
+        title = [NSString stringWithFormat:@"Cancel (%ld/%ld)", (long)dm.batchCompleted, (long)dm.batchTotal];
+        fill = [ELTheme accentColor];
     } else if ([self allTracksDownloaded]) {
-        [_downloadPlaylistBtn setTitle:@"Saved Offline" forState:UIControlStateNormal];
-        UIImage *bg = [ELTheme roundedRectImageWithSize:_downloadPlaylistBtn.frame.size
-                                                  radius:18.0f
-                                               fillColor:[ELTheme successColor]
-                                             borderColor:nil];
-        [_downloadPlaylistBtn setBackgroundImage:bg forState:UIControlStateNormal];
-    } else {
-        [_downloadPlaylistBtn setTitle:@"Download Playlist" forState:UIControlStateNormal];
-        UIImage *bg = [ELTheme roundedRectImageWithSize:_downloadPlaylistBtn.frame.size
-                                                  radius:18.0f
-                                               fillColor:[ELTheme surfaceHighlightColor]
-                                             borderColor:nil];
-        [_downloadPlaylistBtn setBackgroundImage:bg forState:UIControlStateNormal];
+        title = @"Saved Offline";
+        fill = [ELTheme successColor];
     }
+    [_downloadPlaylistBtn setTitle:title forState:UIControlStateNormal];
+    UIImage *bg = [ELTheme roundedRectImageWithSize:_downloadPlaylistBtn.frame.size
+                                              radius:18.0f
+                                           fillColor:fill
+                                         borderColor:nil];
+    [_downloadPlaylistBtn setBackgroundImage:bg forState:UIControlStateNormal];
 }
 
 - (void)onDownloadsChanged {
-    [self refreshVisibleCellsForVideoId:nil];
+    [ELTrackListHelper refreshVisibleTrackCellsInTableView:_tableView forVideoId:nil];
     [self updateDownloadButtonState];
 }
 
 - (void)onDownloadProgress:(NSNotification *)note {
     NSString *vid = [[note userInfo] objectForKey:@"videoId"];
-    [self refreshVisibleCellsForVideoId:vid];
+    [ELTrackListHelper refreshVisibleTrackCellsInTableView:_tableView forVideoId:vid];
 }
 
 - (void)onBatchProgress {
     [self updateDownloadButtonState];
 }
+#else
+- (void)updateDownloadButtonState {
+}
+#endif
 
 - (void)updateHeaderInfoLabel {
     if (!_headerInfoLabel) return;
@@ -348,6 +330,7 @@
     [shufBtn addTarget:self action:@selector(onShuffleAll) forControlEvents:UIControlEventTouchUpInside];
     [hdr addSubview:shufBtn];
 
+#if EL_FEATURE_DOWNLOADS
     [_downloadPlaylistBtn release];
     _downloadPlaylistBtn = [[ELTheme pillButtonWithTitle:@"Download Playlist"
                                                   color:[ELTheme surfaceHighlightColor]
@@ -356,6 +339,7 @@
     [_downloadPlaylistBtn addTarget:self action:@selector(onDownloadAll) forControlEvents:UIControlEventTouchUpInside];
     [hdr addSubview:_downloadPlaylistBtn];
     [self updateDownloadButtonState];
+#endif
 
     return hdr;
 }
@@ -368,6 +352,7 @@
     if ([_tracks count] > 0) [[ELAudioEngine sharedEngine] playTracksShuffled:_tracks];
 }
 
+#if EL_FEATURE_DOWNLOADS
 - (void)onDownloadAll {
     ELDownloadManager *dm = [ELDownloadManager sharedManager];
     if (dm.isBatchDownloading) {
@@ -378,26 +363,26 @@
     }
     [self updateDownloadButtonState];
 }
+#endif
+
+- (BOOL)tracks:(NSArray *)a matchPrefixOf:(NSArray *)b count:(NSUInteger)count {
+    for (NSUInteger i = 0; i < count; i++) {
+        ELTrack *ta = [a objectAtIndex:i];
+        ELTrack *tb = [b objectAtIndex:i];
+        if (![ta.videoId isEqualToString:tb.videoId]) return NO;
+    }
+    return YES;
+}
 
 - (BOOL)tracksMatchPrefix:(NSArray *)incoming {
     if ([_tracks count] < [incoming count]) return NO;
-    for (NSUInteger i = 0; i < [incoming count]; i++) {
-        ELTrack *a = [_tracks objectAtIndex:i];
-        ELTrack *b = [incoming objectAtIndex:i];
-        if (![a.videoId isEqualToString:b.videoId]) return NO;
-    }
-    return YES;
+    return [self tracks:_tracks matchPrefixOf:incoming count:[incoming count]];
 }
 
 - (BOOL)currentTracksArePrefixOf:(NSArray *)incoming {
     NSUInteger curCount = [_tracks count];
     if (curCount == 0 || curCount > [incoming count]) return NO;
-    for (NSUInteger i = 0; i < curCount; i++) {
-        ELTrack *a = [_tracks objectAtIndex:i];
-        ELTrack *b = [incoming objectAtIndex:i];
-        if (![a.videoId isEqualToString:b.videoId]) return NO;
-    }
-    return YES;
+    return [self tracks:_tracks matchPrefixOf:incoming count:curCount];
 }
 
 - (void)onPlaylistFirstPageLoaded:(NSDictionary *)res {
@@ -513,13 +498,8 @@
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    static NSString *cid = @"ELTrackCell";
-    ELTrackCell *cell = (ELTrackCell *)[tableView dequeueReusableCellWithIdentifier:cid];
-    if (!cell) cell = [[[ELTrackCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:cid] autorelease];
-    ELTrack *t = [_tracks objectAtIndex:indexPath.row];
-    ELTrack *cur = [[ELAudioEngine sharedEngine] currentTrack];
-    [cell configureWithTrack:t isCurrent:(cur && [cur.videoId isEqualToString:t.videoId])];
-    return cell;
+    return [ELTrackListHelper dequeueTrackCellForTableView:tableView
+                                                     track:[_tracks objectAtIndex:indexPath.row]];
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {

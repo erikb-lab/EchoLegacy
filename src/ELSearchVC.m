@@ -1,8 +1,11 @@
 #import "ELSearchVC.h"
 #import "ELAudioEngine.h"
+#import "ELFeatures.h"
+#if EL_FEATURE_DOWNLOADS
 #import "ELDownloadManager.h"
+#endif
 #import "ELTheme.h"
-#import "ELTrackCell.h"
+#import "ELTrackListHelper.h"
 #import "ELYouTubeClient.h"
 #import <sys/stat.h>
 
@@ -140,33 +143,30 @@ static void el_save_history_array(NSArray *queries) {
 
     [self.view addSubview:_searchBarContainer];
 
-    _tableView = [[UITableView alloc] initWithFrame:CGRectMake(0.0f, 54.0f, 320.0f, self.view.bounds.size.height - 54.0f)
-                                              style:UITableViewStylePlain];
-    _tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    _tableView.dataSource = self;
-    _tableView.delegate = self;
-    _tableView.contentInset = UIEdgeInsetsMake(0, 0, 56, 0);
-    _tableView.scrollIndicatorInsets = _tableView.contentInset;
-    [ELTheme styleTableView:_tableView];
+    _tableView = [[ELTrackListHelper createTrackTableViewWithFrame:CGRectMake(0.0f, 54.0f, 320.0f, self.view.bounds.size.height - 54.0f)
+                                                          delegate:self
+                                                         rowHeight:0.0f] retain];
     [self.view addSubview:_tableView];
 
-    _spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleWhiteLarge];
-    _spinner.center = CGPointMake(160, 185);
-    _spinner.hidesWhenStopped = YES;
+    _spinner = [[ELTrackListHelper createSpinnerAtCenter:CGPointMake(160.0f, 185.0f)] retain];
     [self.view addSubview:_spinner];
 
-    _hintLabel = [[UILabel alloc] initWithFrame:CGRectMake(28, 150, 264, 60)];
-    _hintLabel.backgroundColor = [UIColor clearColor];
-    _hintLabel.font = [UIFont systemFontOfSize:14.0f];
-    _hintLabel.textColor = [ELTheme textSecondaryColor];
-    _hintLabel.textAlignment = UITextAlignmentCenter;
-    _hintLabel.numberOfLines = 3;
-    _hintLabel.text = @"Search any song or artist.\nTap a track to stream, or tap the arrow to save offline.";
+#if EL_FEATURE_DOWNLOADS
+    NSString *hintText = @"Search any song or artist.\nTap a track to stream, or tap the arrow to save offline.";
+#else
+    NSString *hintText = @"Search any song or artist.\nTap a track to stream.";
+#endif
+    _hintLabel = [[ELTrackListHelper createEmptyLabelWithFrame:CGRectMake(28.0f, 150.0f, 264.0f, 60.0f)
+                                                          text:hintText
+                                                      fontSize:14.0f
+                                                         lines:3] retain];
     [self.view addSubview:_hintLabel];
 
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onPlayerStateChanged) name:ELPlayerStateChangedNotification object:nil];
+#if EL_FEATURE_DOWNLOADS
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onDownloadsChanged) name:ELDownloadsChangedNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onDownloadProgress:) name:ELDownloadProgressNotification object:nil];
+#endif
 
     [self updateEmptyHint];
 }
@@ -177,27 +177,20 @@ static void el_save_history_array(NSArray *queries) {
     }
 }
 
-- (void)refreshVisibleCellsForVideoId:(NSString *)videoId {
-    if (_showingHistory) return;
-    NSArray *cells = [_tableView visibleCells];
-    for (UITableViewCell *cell in cells) {
-        if ([cell isKindOfClass:[ELTrackCell class]]) {
-            ELTrackCell *tc = (ELTrackCell *)cell;
-            if (!videoId || [tc.videoId isEqualToString:videoId]) {
-                [tc refreshDownloadState];
-            }
-        }
+#if EL_FEATURE_DOWNLOADS
+- (void)onDownloadsChanged {
+    if (!_showingHistory) {
+        [ELTrackListHelper refreshVisibleTrackCellsInTableView:_tableView forVideoId:nil];
     }
 }
 
-- (void)onDownloadsChanged {
-    [self refreshVisibleCellsForVideoId:nil];
-}
-
 - (void)onDownloadProgress:(NSNotification *)note {
-    NSString *vid = [[note userInfo] objectForKey:@"videoId"];
-    [self refreshVisibleCellsForVideoId:vid];
+    if (!_showingHistory) {
+        NSString *vid = [[note userInfo] objectForKey:@"videoId"];
+        [ELTrackListHelper refreshVisibleTrackCellsInTableView:_tableView forVideoId:vid];
+    }
 }
+#endif
 
 - (void)updateEmptyHint {
     if (_showingHistory) {
@@ -357,17 +350,7 @@ static void el_save_history_array(NSArray *queries) {
 - (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
     (void)tableView; (void)section;
     if (!_showingHistory || [_recentQueries count] == 0) return nil;
-    UIView *v = [[[UIView alloc] initWithFrame:CGRectMake(0, 0, 320, 26)] autorelease];
-    v.backgroundColor = [ELTheme surfaceColor];
-    v.opaque = YES;
-    UILabel *lbl = [[[UILabel alloc] initWithFrame:CGRectMake(14, 0, 292, 26)] autorelease];
-    lbl.backgroundColor = [ELTheme surfaceColor];
-    lbl.opaque = YES;
-    lbl.font = [UIFont boldSystemFontOfSize:11.0f];
-    lbl.textColor = [ELTheme textSecondaryColor];
-    lbl.text = @"RECENT SEARCHES";
-    [v addSubview:lbl];
-    return v;
+    return [ELTrackListHelper createSectionHeaderWithTitle:@"RECENT SEARCHES" height:26.0f];
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
@@ -400,13 +383,8 @@ static void el_save_history_array(NSArray *queries) {
         return cell;
     }
 
-    static NSString *cid = @"ELTrackCell";
-    ELTrackCell *cell = (ELTrackCell *)[tableView dequeueReusableCellWithIdentifier:cid];
-    if (!cell) cell = [[[ELTrackCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:cid] autorelease];
-    ELTrack *t = [_results objectAtIndex:indexPath.row];
-    ELTrack *cur = [[ELAudioEngine sharedEngine] currentTrack];
-    [cell configureWithTrack:t isCurrent:(cur && [cur.videoId isEqualToString:t.videoId])];
-    return cell;
+    return [ELTrackListHelper dequeueTrackCellForTableView:tableView
+                                                     track:[_results objectAtIndex:indexPath.row]];
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {

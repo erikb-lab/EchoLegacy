@@ -1,26 +1,60 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
+#import "ELFeatures.h"
 
-@interface ELNowPlayingVC : UIViewController <UITableViewDataSource, UITableViewDelegate, UIActionSheetDelegate> {
+#define EL_NP_HAS_MORE_MENU (EL_FEATURE_RADIO_MIX || EL_FEATURE_SLEEP_TIMER || EL_FEATURE_DOWNLOADS)
+
+@interface ELNowPlayingVC : UIViewController
+#if EL_FEATURE_LYRICS || EL_NP_HAS_MORE_MENU
+<
+#if EL_FEATURE_LYRICS
+    UITableViewDataSource, UITableViewDelegate
+#if EL_NP_HAS_MORE_MENU
+    ,
+#endif
+#endif
+#if EL_NP_HAS_MORE_MENU
+    UIActionSheetDelegate
+#endif
+>
+#endif
+{
     CAGradientLayer *_backdropGradient;
     CAGradientLayer *_topScrimLayer;
     CAGradientLayer *_artFadeLayer;
     UIImageView *_artView;
     UILabel *_sourceBadge;
+#if EL_FEATURE_LYRICS
     UIButton *_lyricsBtn;
     UIView *_lyricsContainer;
     UITableView *_lyricsTable;
     UILabel *_lyricsStatusLabel;
+#endif
+#if EL_FEATURE_MARQUEE
     UIView *_titleMarqueeContainer;
     UIView *_titleTrackView;
-    UILabel *_titleLabel;
     UILabel *_titleLabelClone;
     UIView *_artistMarqueeContainer;
     UIView *_artistTrackView;
-    UILabel *_artistLabel;
     UILabel *_artistLabelClone;
+    BOOL _isViewVisible;
+    NSString *_lastTitleText;
+    NSString *_lastArtistText;
+#endif
+    UILabel *_titleLabel;
+    UILabel *_artistLabel;
+#if EL_NP_HAS_MORE_MENU
     UIButton *_moreBtn;
+    NSInteger _moreRadioIdx;
+    NSInteger _moreSleepIdx;
+    NSInteger _moreDownloadIdx;
+#endif
+#if EL_FEATURE_LIKES
     UIButton *_likeBtn;
+    BOOL _isLiked;
+    NSInteger _likeRequestGen;
+    NSString *_inFlightLikeVideoId;
+#endif
     UISlider *_scrubber;
     UILabel *_elapsedLabel;
     UILabel *_durationLabel;
@@ -33,25 +67,23 @@
     UIImageView *_repeatDot;
     UILabel *_repeatOneBadge;
     UIButton *_queueBtn;
+#if EL_FEATURE_DOWNLOADS
     UIButton *_downloadBtn;
+#endif
     UIActivityIndicatorView *_spinner;
     BOOL _isScrubbing;
-    BOOL _isLiked;
+#if EL_FEATURE_LYRICS
     BOOL _showingLyrics;
-    BOOL _isViewVisible;
-    NSInteger _likeRequestGen;
     NSInteger _lyricsGen;
     NSInteger _activeLyricIndex;
-    NSInteger _lastDisplayedElapsedSec;
-    NSInteger _lastDisplayedDurationSec;
     NSArray *_lyricLines;
     NSString *_lyricsVideoId;
-    NSString *_inFlightLikeVideoId;
+#endif
+    NSInteger _lastDisplayedElapsedSec;
+    NSInteger _lastDisplayedDurationSec;
     NSString *_currentVideoId;
     NSString *_loadedArtKey;
     NSString *_loadedArtURL;
-    NSString *_lastTitleText;
-    NSString *_lastArtistText;
 }
 
 @end

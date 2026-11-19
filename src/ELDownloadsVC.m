@@ -2,7 +2,8 @@
 #import "ELAudioEngine.h"
 #import "ELDownloadManager.h"
 #import "ELTheme.h"
-#import "ELTrackCell.h"
+#import "ELTrack.h"
+#import "ELTrackListHelper.h"
 
 @implementation ELDownloadsVC
 
@@ -18,10 +19,19 @@
     return self;
 }
 
-- (void)dealloc {
+- (void)releaseViewOutlets {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
-    [_tableView release];
-    [_emptyLabel release];
+    [_tableView release]; _tableView = nil;
+    [_emptyLabel release]; _emptyLabel = nil;
+}
+
+- (void)viewDidUnload {
+    [self releaseViewOutlets];
+    [super viewDidUnload];
+}
+
+- (void)dealloc {
+    [self releaseViewOutlets];
     [_tracks release];
     [super dealloc];
 }
@@ -31,23 +41,15 @@
     self.view.backgroundColor = [ELTheme backgroundColor];
     [ELTheme styleNavBar:self.navigationController.navigationBar];
 
-    _tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStylePlain];
-    _tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    _tableView.dataSource = self;
-    _tableView.delegate = self;
-    _tableView.rowHeight = 62.0f;
-    _tableView.contentInset = UIEdgeInsetsMake(0, 0, 56, 0);
-    _tableView.scrollIndicatorInsets = _tableView.contentInset;
-    [ELTheme styleTableView:_tableView];
+    _tableView = [[ELTrackListHelper createTrackTableViewWithFrame:self.view.bounds
+                                                          delegate:self
+                                                         rowHeight:62.0f] retain];
     [self.view addSubview:_tableView];
 
-    _emptyLabel = [[UILabel alloc] initWithFrame:CGRectMake(28, 130, 264, 60)];
-    _emptyLabel.backgroundColor = [UIColor clearColor];
-    _emptyLabel.font = [UIFont systemFontOfSize:14.0f];
-    _emptyLabel.textColor = [ELTheme textSecondaryColor];
-    _emptyLabel.textAlignment = UITextAlignmentCenter;
-    _emptyLabel.numberOfLines = 3;
-    _emptyLabel.text = @"No downloaded songs yet.\nTap the download arrow on any track to play 100% offline.";
+    _emptyLabel = [[ELTrackListHelper createEmptyLabelWithFrame:CGRectMake(28.0f, 130.0f, 264.0f, 60.0f)
+                                                           text:@"No downloaded songs yet.\nTap the download arrow on any track to play 100% offline."
+                                                       fontSize:14.0f
+                                                          lines:3] retain];
     [self.view addSubview:_emptyLabel];
 
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refreshDownloads) name:ELDownloadsChangedNotification object:nil];
@@ -120,13 +122,8 @@
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    static NSString *cid = @"ELTrackCell";
-    ELTrackCell *cell = (ELTrackCell *)[tableView dequeueReusableCellWithIdentifier:cid];
-    if (!cell) cell = [[[ELTrackCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:cid] autorelease];
-    ELTrack *t = [_tracks objectAtIndex:indexPath.row];
-    ELTrack *cur = [[ELAudioEngine sharedEngine] currentTrack];
-    [cell configureWithTrack:t isCurrent:(cur && [cur.videoId isEqualToString:t.videoId])];
-    return cell;
+    return [ELTrackListHelper dequeueTrackCellForTableView:tableView
+                                                     track:[_tracks objectAtIndex:indexPath.row]];
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {

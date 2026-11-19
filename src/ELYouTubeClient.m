@@ -22,22 +22,21 @@ static NSString *const kWebUserAgent = @"Mozilla/5.0 (Windows NT 10.0; Win64; x6
 }
 @end
 
-static NSString *el_library_cache_path(void) {
+static NSString *el_docs_cache_dir(NSString *subdir) {
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
     NSString *docs = ([paths count] > 0) ? [paths objectAtIndex:0] : NSTemporaryDirectory();
-    NSString *dir = [docs stringByAppendingPathComponent:@"EchoLegacy"];
-    NSFileManager *fm = [[[NSFileManager alloc] init] autorelease];
-    [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-    return [dir stringByAppendingPathComponent:@"library_cache.plist"];
-}
-
-static NSString *el_playlists_cache_dir(void) {
-    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-    NSString *docs = ([paths count] > 0) ? [paths objectAtIndex:0] : NSTemporaryDirectory();
-    NSString *dir = [docs stringByAppendingPathComponent:@"EchoLegacy/playlists"];
+    NSString *dir = [docs stringByAppendingPathComponent:subdir];
     NSFileManager *fm = [[[NSFileManager alloc] init] autorelease];
     [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     return dir;
+}
+
+static NSString *el_library_cache_path(void) {
+    return [el_docs_cache_dir(@"EchoLegacy") stringByAppendingPathComponent:@"library_cache.plist"];
+}
+
+static NSString *el_playlists_cache_dir(void) {
+    return el_docs_cache_dir(@"EchoLegacy/playlists");
 }
 
 static NSString *el_sanitize_playlist_filename(NSString *playlistId) {
@@ -126,8 +125,46 @@ static NSString *el_extract_best_thumb(NSDictionary *thumbRenderer) {
     NSDictionary *thumbObj = [ELJSON dict:thumbRenderer forKey:@"thumbnail"];
     NSArray *thumbs = [ELJSON array:thumbObj forKey:@"thumbnails"];
     if ([thumbs count] == 0) return @"";
-    NSDictionary *last = [thumbs lastObject];
-    return [ELJSON string:last forKey:@"url"] ? [ELJSON string:last forKey:@"url"] : @"";
+    NSString *url = [ELJSON string:[thumbs lastObject] forKey:@"url"];
+    return url ? url : @"";
+}
+
+static ELTrack *el_make_track(NSString *videoId,
+                              NSString *title,
+                              NSString *artist,
+                              NSString *album,
+                              NSString *duration,
+                              NSString *rawThumb) {
+    ELTrack *track = [[[ELTrack alloc] init] autorelease];
+    track.videoId = videoId;
+    track.title = title;
+    track.artist = ([artist length] > 0) ? artist : @"Unknown Artist";
+    track.album = album ? album : @"";
+    track.durationText = duration ? duration : @"";
+    track.durationSeconds = el_parse_duration_text(duration);
+    track.thumbURL = el_resize_google_thumb(rawThumb, 120);
+    track.artURL = el_resize_google_thumb(rawThumb, 300);
+    return track;
+}
+
+static NSString *el_extract_artists_from_runs(NSArray *runs, BOOL stopAtViews, NSUInteger maxArtists) {
+    NSMutableArray *artists = [NSMutableArray array];
+    NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+    for (id runObj in runs) {
+        if (![runObj isKindOfClass:[NSDictionary class]]) continue;
+        NSString *txt = [[ELJSON string:runObj forKey:@"text"] stringByTrimmingCharactersInSet:ws];
+        if ([txt length] == 0 || [txt isEqualToString:@"\u2022"] ||
+            [txt isEqualToString:@"&"] || [txt isEqualToString:@","]) continue;
+        if ([txt isEqualToString:@"Song"] || [txt isEqualToString:@"Video"]) continue;
+        if ([txt rangeOfString:@"views" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            if (stopAtViews) break;
+            continue;
+        }
+        if (el_looks_like_duration(txt)) continue;
+        [artists addObject:txt];
+        if (maxArtists > 0 && [artists count] >= maxArtists) break;
+    }
+    return ([artists count] > 0) ? [artists componentsJoinedByString:@", "] : @"YouTube Music";
 }
 
 static ELTrack *el_parse_music_list_item(NSDictionary *renderer) {
@@ -215,17 +252,7 @@ static ELTrack *el_parse_music_list_item(NSDictionary *renderer) {
 
     NSDictionary *thumbWrap = [ELJSON dict:renderer forKey:@"thumbnail"];
     NSString *rawThumb = el_extract_best_thumb([ELJSON dict:thumbWrap forKey:@"musicThumbnailRenderer"]);
-
-    ELTrack *track = [[[ELTrack alloc] init] autorelease];
-    track.videoId = videoId;
-    track.title = title;
-    track.artist = ([artist length] > 0) ? artist : @"Unknown Artist";
-    track.album = album ? album : @"";
-    track.durationText = duration ? duration : @"";
-    track.durationSeconds = el_parse_duration_text(duration);
-    track.thumbURL = el_resize_google_thumb(rawThumb, 120);
-    track.artURL = el_resize_google_thumb(rawThumb, 300);
-    return track;
+    return el_make_track(videoId, title, artist, album, duration, rawThumb);
 }
 
 static ELTrack *el_parse_tile_video(NSDictionary *tile) {
@@ -272,16 +299,7 @@ static ELTrack *el_parse_tile_video(NSDictionary *tile) {
         }
     }
 
-    ELTrack *track = [[[ELTrack alloc] init] autorelease];
-    track.videoId = videoId;
-    track.title = title;
-    track.artist = artist;
-    track.album = @"";
-    track.durationText = duration;
-    track.durationSeconds = el_parse_duration_text(duration);
-    track.thumbURL = el_resize_google_thumb(rawThumb, 120);
-    track.artURL = el_resize_google_thumb(rawThumb, 300);
-    return track;
+    return el_make_track(videoId, title, artist, @"", duration, rawThumb);
 }
 
 static ELTrack *el_parse_music_two_row_item(NSDictionary *renderer) {
@@ -305,35 +323,13 @@ static ELTrack *el_parse_music_two_row_item(NSDictionary *renderer) {
     NSString *title = el_text_from_yt_obj([renderer objectForKey:@"title"]);
     if ([title length] == 0) return nil;
 
-    NSMutableArray *artists = [NSMutableArray array];
     NSArray *subRuns = [ELJSON array:[ELJSON dict:renderer forKey:@"subtitle"] forKey:@"runs"];
-    for (id runObj in subRuns) {
-        if (![runObj isKindOfClass:[NSDictionary class]]) continue;
-        NSString *txt = [[ELJSON string:runObj forKey:@"text"]
-                         stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if ([txt length] == 0 || [txt isEqualToString:@"\u2022"] || [txt isEqualToString:@"&"] || [txt isEqualToString:@","]) continue;
-        if ([txt isEqualToString:@"Song"] || [txt isEqualToString:@"Video"]) continue;
-        if ([txt rangeOfString:@"views" options:NSCaseInsensitiveSearch].location != NSNotFound) continue;
-        if (el_looks_like_duration(txt)) continue;
-        [artists addObject:txt];
-        if ([artists count] >= 2) break;
-    }
-    NSString *artist = ([artists count] > 0) ? [artists componentsJoinedByString:@", "] : @"YouTube Music";
+    NSString *artist = el_extract_artists_from_runs(subRuns, NO, 2);
 
     NSDictionary *thumbRenderer = [ELJSON dict:[ELJSON dict:renderer forKey:@"thumbnailRenderer"]
                                         forKey:@"musicThumbnailRenderer"];
     NSString *rawThumb = el_extract_best_thumb(thumbRenderer);
-
-    ELTrack *track = [[[ELTrack alloc] init] autorelease];
-    track.videoId = videoId;
-    track.title = title;
-    track.artist = artist;
-    track.album = @"";
-    track.durationText = @"";
-    track.durationSeconds = 0;
-    track.thumbURL = el_resize_google_thumb(rawThumb, 120);
-    track.artURL = el_resize_google_thumb(rawThumb, 300);
-    return track;
+    return el_make_track(videoId, title, artist, @"", @"", rawThumb);
 }
 
 static ELTrack *el_parse_playlist_panel_video(NSDictionary *renderer) {
@@ -352,75 +348,40 @@ static ELTrack *el_parse_playlist_panel_video(NSDictionary *renderer) {
 
     NSDictionary *byline = [ELJSON dict:renderer forKey:@"shortBylineText"];
     if (!byline) byline = [ELJSON dict:renderer forKey:@"longBylineText"];
-    NSMutableArray *artists = [NSMutableArray array];
-    for (id runObj in [ELJSON array:byline forKey:@"runs"]) {
-        if (![runObj isKindOfClass:[NSDictionary class]]) continue;
-        NSString *txt = [[ELJSON string:runObj forKey:@"text"]
-                         stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if ([txt length] == 0 || [txt isEqualToString:@"\u2022"] || [txt isEqualToString:@"&"] || [txt isEqualToString:@","]) continue;
-        if ([txt rangeOfString:@"views" options:NSCaseInsensitiveSearch].location != NSNotFound) break;
-        if (el_looks_like_duration(txt)) continue;
-        [artists addObject:txt];
-        break; /* First artist/channel run is cleanest in radio panel */
-    }
-    NSString *artist = ([artists count] > 0) ? [artists componentsJoinedByString:@", "] : @"YouTube Music";
+    NSString *artist = el_extract_artists_from_runs([ELJSON array:byline forKey:@"runs"], YES, 1);
 
     NSString *duration = el_text_from_yt_obj([renderer objectForKey:@"lengthText"]);
     NSString *rawThumb = el_extract_best_thumb(renderer);
-
-    ELTrack *track = [[[ELTrack alloc] init] autorelease];
-    track.videoId = videoId;
-    track.title = title;
-    track.artist = artist;
-    track.album = @"";
-    track.durationText = duration;
-    track.durationSeconds = el_parse_duration_text(duration);
-    track.thumbURL = el_resize_google_thumb(rawThumb, 120);
-    track.artURL = el_resize_google_thumb(rawThumb, 300);
-    return track;
+    return el_make_track(videoId, title, artist, @"", duration, rawThumb);
 }
 
 #define EL_YT_MAX_WALK_DEPTH 64
+
+typedef ELTrack *(*el_track_parser_fn)(NSDictionary *renderer);
 
 static void el_collect_tracks_recursive(id node, NSMutableArray *outTracks, NSMutableSet *seenIds, int depth) {
     if (depth > EL_YT_MAX_WALK_DEPTH) return;
     if ([node isKindOfClass:[NSDictionary class]]) {
         NSDictionary *dict = (NSDictionary *)node;
-        NSDictionary *renderer = [ELJSON dict:dict forKey:@"musicResponsiveListItemRenderer"];
-        if (renderer) {
-            ELTrack *t = el_parse_music_list_item(renderer);
-            if (t && ![seenIds containsObject:t.videoId]) {
-                [seenIds addObject:t.videoId];
-                [outTracks addObject:t];
+        static const struct {
+            NSString *key;
+            el_track_parser_fn parser;
+        } kParsers[] = {
+            { @"musicResponsiveListItemRenderer", el_parse_music_list_item },
+            { @"musicTwoRowItemRenderer",         el_parse_music_two_row_item },
+            { @"playlistPanelVideoRenderer",      el_parse_playlist_panel_video },
+            { @"tileRenderer",                    el_parse_tile_video }
+        };
+        for (size_t i = 0; i < sizeof(kParsers) / sizeof(kParsers[0]); i++) {
+            NSDictionary *renderer = [ELJSON dict:dict forKey:kParsers[i].key];
+            if (renderer) {
+                ELTrack *t = kParsers[i].parser(renderer);
+                if (t && ![seenIds containsObject:t.videoId]) {
+                    [seenIds addObject:t.videoId];
+                    [outTracks addObject:t];
+                }
+                return;
             }
-            return;
-        }
-        NSDictionary *twoRow = [ELJSON dict:dict forKey:@"musicTwoRowItemRenderer"];
-        if (twoRow) {
-            ELTrack *t = el_parse_music_two_row_item(twoRow);
-            if (t && ![seenIds containsObject:t.videoId]) {
-                [seenIds addObject:t.videoId];
-                [outTracks addObject:t];
-            }
-            return;
-        }
-        NSDictionary *panel = [ELJSON dict:dict forKey:@"playlistPanelVideoRenderer"];
-        if (panel) {
-            ELTrack *t = el_parse_playlist_panel_video(panel);
-            if (t && ![seenIds containsObject:t.videoId]) {
-                [seenIds addObject:t.videoId];
-                [outTracks addObject:t];
-            }
-            return;
-        }
-        NSDictionary *tile = [ELJSON dict:dict forKey:@"tileRenderer"];
-        if (tile) {
-            ELTrack *t = el_parse_tile_video(tile);
-            if (t && ![seenIds containsObject:t.videoId]) {
-                [seenIds addObject:t.videoId];
-                [outTracks addObject:t];
-            }
-            return;
         }
         for (id key in dict) {
             el_collect_tracks_recursive([dict objectForKey:key], outTracks, seenIds, depth + 1);
@@ -686,6 +647,29 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
     return [NSDictionary dictionaryWithObjectsAndKeys:client, @"client", nil];
 }
 
+- (NSDictionary *)postInnerTubeURL:(NSString *)url
+                           headers:(NSDictionary *)headers
+                              body:(NSDictionary *)body
+                       errorPrefix:(NSString *)errPrefix
+                     allowEmpty200:(BOOL)allowEmpty200
+                             error:(NSString **)outError {
+    NSData *payload = [ELJSON dataWithObject:body];
+    ELHTTPResponse *resp = [[ELHTTPClient sharedClient] postURL:url headers:headers body:payload];
+    if (resp.errorMessage) {
+        if (outError) *outError = resp.errorMessage;
+        return nil;
+    }
+    NSDictionary *json = [ELJSON youtubeObjectWithData:resp.body];
+    BOOL badDict = (!allowEmpty200 && ![json isKindOfClass:[NSDictionary class]]);
+    if (resp.statusCode >= 400 || badDict) {
+        NSDictionary *errObj = [ELJSON dict:json forKey:@"error"];
+        NSString *msg = [ELJSON string:errObj forKey:@"message"];
+        if (outError) *outError = msg ? msg : [NSString stringWithFormat:@"%@ HTTP %ld", errPrefix, (long)resp.statusCode];
+        return nil;
+    }
+    return json ? json : [NSDictionary dictionary];
+}
+
 - (NSDictionary *)postYTMusicEndpoint:(NSString *)endpoint
                                  body:(NSDictionary *)body
                          authenticated:(BOOL)useAuth
@@ -710,20 +694,12 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
     }
 
     NSString *url = [NSString stringWithFormat:@"https://music.youtube.com/youtubei/v1/%@?prettyPrint=false", endpoint];
-    NSData *payload = [ELJSON dataWithObject:body];
-    ELHTTPResponse *resp = [[ELHTTPClient sharedClient] postURL:url headers:headers body:payload];
-    if (resp.errorMessage) {
-        if (outError) *outError = resp.errorMessage;
-        return nil;
-    }
-    NSDictionary *json = [ELJSON youtubeObjectWithData:resp.body];
-    if (resp.statusCode >= 400 || ![json isKindOfClass:[NSDictionary class]]) {
-        NSDictionary *errObj = [ELJSON dict:json forKey:@"error"];
-        NSString *msg = [ELJSON string:errObj forKey:@"message"];
-        if (outError) *outError = msg ? msg : [NSString stringWithFormat:@"YouTube Music HTTP %ld", (long)resp.statusCode];
-        return nil;
-    }
-    return json;
+    return [self postInnerTubeURL:url
+                          headers:headers
+                             body:body
+                      errorPrefix:@"YouTube Music"
+                    allowEmpty200:NO
+                            error:outError];
 }
 
 - (NSArray *)searchSongs:(NSString *)query error:(NSString **)outError {
@@ -1012,7 +988,11 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
     return [NSDictionary dictionaryWithObjectsAndKeys:client, @"client", nil];
 }
 
-- (NSDictionary *)postTVBrowseBody:(NSDictionary *)extraBody error:(NSString **)outError {
+- (NSDictionary *)postTVEndpoint:(NSString *)endpoint
+                         extraBody:(NSDictionary *)extraBody
+                       errorPrefix:(NSString *)errPrefix
+                     allowEmpty200:(BOOL)allowEmpty200
+                             error:(NSString **)outError {
     NSString *authErr = nil;
     NSString *token = [[ELAuthManager sharedManager] validAccessTokenWithError:&authErr];
     if ([token length] == 0) {
@@ -1028,25 +1008,21 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
                              [NSString stringWithFormat:@"Bearer %@", token], @"Authorization",
                              @"gzip", @"Accept-Encoding",
                              nil];
-    ELHTTPResponse *resp = [[ELHTTPClient sharedClient] postURL:@"https://youtubei.googleapis.com/youtubei/v1/browse?prettyPrint=false"
-                                                        headers:headers
-                                                           body:[ELJSON dataWithObject:body]];
-    if (resp.errorMessage) {
-        if (outError) *outError = resp.errorMessage;
-        return nil;
-    }
-    NSDictionary *json = [ELJSON youtubeObjectWithData:resp.body];
-    if (resp.statusCode >= 400 || ![json isKindOfClass:[NSDictionary class]]) {
-        NSDictionary *errObj = [ELJSON dict:json forKey:@"error"];
-        NSString *msg = [ELJSON string:errObj forKey:@"message"];
-        if (outError) *outError = msg ? msg : [NSString stringWithFormat:@"YouTube TV HTTP %ld", (long)resp.statusCode];
-        return nil;
-    }
-    return json;
+    NSString *url = [NSString stringWithFormat:@"https://youtubei.googleapis.com/youtubei/v1/%@?prettyPrint=false", endpoint];
+    return [self postInnerTubeURL:url
+                          headers:headers
+                             body:body
+                      errorPrefix:errPrefix
+                    allowEmpty200:allowEmpty200
+                            error:outError];
 }
 
-- (NSDictionary *)postTVBrowseId:(NSString *)browseId error:(NSString **)outError {
-    return [self postTVBrowseBody:[NSDictionary dictionaryWithObject:browseId forKey:@"browseId"] error:outError];
+- (NSDictionary *)postTVBrowseBody:(NSDictionary *)extraBody error:(NSString **)outError {
+    return [self postTVEndpoint:@"browse"
+                      extraBody:extraBody
+                    errorPrefix:@"YouTube TV"
+                  allowEmpty200:NO
+                          error:outError];
 }
 
 - (NSArray *)fetchPlaylistPageForId:(NSString *)playlistId
@@ -1218,39 +1194,10 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
     }
 
     if ([[ELAuthManager sharedManager] isSignedIn]) {
-        NSString *authErr = nil;
-        NSString *token = [[ELAuthManager sharedManager] validAccessTokenWithError:&authErr];
-        if ([token length] == 0) {
-            if (outError) *outError = authErr ? authErr : @"Sign in with Google first";
-            return NO;
-        }
-
-        NSString *endpoint = liked
-            ? @"https://youtubei.googleapis.com/youtubei/v1/like/like?prettyPrint=false"
-            : @"https://youtubei.googleapis.com/youtubei/v1/like/removelike?prettyPrint=false";
-        NSDictionary *target = [NSDictionary dictionaryWithObject:track.videoId forKey:@"videoId"];
-        NSDictionary *body = [NSDictionary dictionaryWithObjectsAndKeys:
-                              [self tvContext], @"context",
-                              target, @"target",
-                              nil];
-        NSDictionary *headers = [NSDictionary dictionaryWithObjectsAndKeys:
-                                 @"application/json", @"Content-Type",
-                                 @"Mozilla/5.0 (Cobalt/Version)", @"User-Agent",
-                                 [NSString stringWithFormat:@"Bearer %@", token], @"Authorization",
-                                 @"gzip", @"Accept-Encoding",
-                                 nil];
-        ELHTTPResponse *resp = [[ELHTTPClient sharedClient] postURL:endpoint
-                                                            headers:headers
-                                                               body:[ELJSON dataWithObject:body]];
-        if (resp.errorMessage) {
-            if (outError) *outError = resp.errorMessage;
-            return NO;
-        }
-        if (resp.statusCode < 200 || resp.statusCode >= 400) {
-            NSDictionary *json = [ELJSON youtubeObjectWithData:resp.body];
-            NSDictionary *errObj = [ELJSON dict:json forKey:@"error"];
-            NSString *msg = [ELJSON string:errObj forKey:@"message"];
-            if (outError) *outError = msg ? msg : [NSString stringWithFormat:@"YouTube Like HTTP %ld", (long)resp.statusCode];
+        NSString *endpoint = liked ? @"like/like" : @"like/removelike";
+        NSDictionary *extra = [NSDictionary dictionaryWithObject:[NSDictionary dictionaryWithObject:track.videoId forKey:@"videoId"]
+                                                          forKey:@"target"];
+        if (![self postTVEndpoint:endpoint extraBody:extra errorPrefix:@"YouTube Like" allowEmpty200:YES error:outError]) {
             return NO;
         }
     }

@@ -45,6 +45,14 @@ static void el_dl_on_adts_frame(const uint8_t *adts, size_t len, void *userData)
     d->adtsBytesWritten += (long long)len;
 }
 
+static void el_remove_tracks_with_video_id(NSMutableArray *arr, NSString *videoId) {
+    for (NSInteger i = (NSInteger)[arr count] - 1; i >= 0; i--) {
+        if ([[[arr objectAtIndex:(NSUInteger)i] videoId] isEqualToString:videoId]) {
+            [arr removeObjectAtIndex:(NSUInteger)i];
+        }
+    }
+}
+
 @interface ELDownloadManager (Internal)
 - (double)currentWorkerPriority;
 - (NSUInteger)currentMaxConcurrentDownloads;
@@ -412,21 +420,42 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
     }
 }
 
+- (BOOL)enqueueTrackLocked:(ELTrack *)track allowCancelledActive:(BOOL)allowCancelledActive {
+    if (!track || !el_is_valid_video_id(track.videoId)) return NO;
+    BOOL activeBlocked = [_activeIds containsObject:track.videoId] &&
+                         (!allowCancelledActive || ![_cancelledIds containsObject:track.videoId]);
+    if ([_downloadedIds containsObject:track.videoId] || activeBlocked ||
+        [_queuedIds containsObject:track.videoId]) {
+        return NO;
+    }
+    [_cancelledIds removeObject:track.videoId];
+    [_pendingQueue addObject:track];
+    [_queuedIds addObject:track.videoId];
+    return YES;
+}
+
+- (void)finishBatchWithSavedCount:(NSInteger)count {
+    NSString *msg = [NSString stringWithFormat:@"Playlist saved (%ld tracks)", (long)count];
+    [self performSelectorOnMainThread:@selector(postBatchToastOnMain:) withObject:msg waitUntilDone:NO];
+    @synchronized(self) {
+        _batchTotal = 0;
+        _batchCompleted = 0;
+        [_batchTitle release];
+        _batchTitle = nil;
+    }
+}
+
 - (void)downloadTrack:(ELTrack *)track {
     if (!track || !el_is_valid_video_id(track.videoId)) return;
 
+    BOOL added = NO;
     @synchronized(self) {
-        if ([_downloadedIds containsObject:track.videoId] ||
-            ([_activeIds containsObject:track.videoId] && ![_cancelledIds containsObject:track.videoId]) ||
-            [_queuedIds containsObject:track.videoId]) {
-            return;
-        }
-        [_cancelledIds removeObject:track.videoId];
-        [_pendingQueue addObject:track];
-        [_queuedIds addObject:track.videoId];
+        added = [self enqueueTrackLocked:track allowCancelledActive:YES];
     }
-    [self performSelectorOnMainThread:@selector(postChangedOnMain) withObject:nil waitUntilDone:NO];
-    [self pumpQueue];
+    if (added) {
+        [self performSelectorOnMainThread:@selector(postChangedOnMain) withObject:nil waitUntilDone:NO];
+        [self pumpQueue];
+    }
 }
 
 - (void)downloadTracks:(NSArray *)tracks {
@@ -434,16 +463,9 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
     BOOL added = NO;
     @synchronized(self) {
         for (ELTrack *track in tracks) {
-            if (!track || !el_is_valid_video_id(track.videoId)) continue;
-            if ([_downloadedIds containsObject:track.videoId] ||
-                [_activeIds containsObject:track.videoId] ||
-                [_queuedIds containsObject:track.videoId]) {
-                continue;
+            if ([self enqueueTrackLocked:track allowCancelledActive:NO]) {
+                added = YES;
             }
-            [_cancelledIds removeObject:track.videoId];
-            [_pendingQueue addObject:track];
-            [_queuedIds addObject:track.videoId];
-            added = YES;
         }
     }
     if (added) {
@@ -496,13 +518,7 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
 
     [self dispatchBatchProgressNotification];
     if (!hasPending && totalCount > 0) {
-        NSString *msg = [NSString stringWithFormat:@"Playlist saved (%ld tracks)", (long)totalCount];
-        [self performSelectorOnMainThread:@selector(postBatchToastOnMain:) withObject:msg waitUntilDone:NO];
-        @synchronized(self) {
-            _batchTotal = 0;
-            _batchCompleted = 0;
-            [_batchTitle release]; _batchTitle = nil;
-        }
+        [self finishBatchWithSavedCount:totalCount];
     } else if (hasPending) {
         [self performSelectorOnMainThread:@selector(postChangedOnMain) withObject:nil waitUntilDone:NO];
         [self pumpQueue];
@@ -622,11 +638,7 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
         [_cancelledIds removeObject:vid];
         if (success && !wasCancelled) {
             [_retryCountById removeObjectForKey:vid];
-            for (NSInteger i = (NSInteger)[_tracks count] - 1; i >= 0; i--) {
-                if ([[[_tracks objectAtIndex:i] videoId] isEqualToString:vid]) {
-                    [_tracks removeObjectAtIndex:i];
-                }
-            }
+            el_remove_tracks_with_video_id(_tracks, vid);
             [_tracks insertObject:track atIndex:0];
             [_downloadedIds addObject:vid];
         } else if (!wasCancelled && !diskFull) {
@@ -667,13 +679,7 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
         [self dispatchBatchProgressNotification];
     }
     if (batchFinished) {
-        NSString *msg = [NSString stringWithFormat:@"Playlist saved (%ld tracks)", (long)batchSavedCount];
-        [self performSelectorOnMainThread:@selector(postBatchToastOnMain:) withObject:msg waitUntilDone:NO];
-        @synchronized(self) {
-            _batchTotal = 0;
-            _batchCompleted = 0;
-            [_batchTitle release]; _batchTitle = nil;
-        }
+        [self finishBatchWithSavedCount:batchSavedCount];
     }
     if (success && ![[ELLyricsClient sharedClient] cachedLyricsForVideoId:vid]) {
         [[ELLyricsClient sharedClient] fetchLyricsForTrack:track error:nil];
@@ -690,11 +696,7 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
         [_progressById removeObjectForKey:videoId];
         [_retryCountById removeObjectForKey:videoId];
         [_batchIds removeObject:videoId];
-        for (NSInteger i = (NSInteger)[_pendingQueue count] - 1; i >= 0; i--) {
-            if ([[[_pendingQueue objectAtIndex:i] videoId] isEqualToString:videoId]) {
-                [_pendingQueue removeObjectAtIndex:i];
-            }
-        }
+        el_remove_tracks_with_video_id(_pendingQueue, videoId);
     }
     [self performSelectorOnMainThread:@selector(postChangedOnMain) withObject:nil waitUntilDone:NO];
 }
@@ -708,11 +710,7 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
     [[ELLyricsClient sharedClient] deleteCachedLyricsForVideoId:videoId];
     @synchronized(self) {
         [_downloadedIds removeObject:videoId];
-        for (NSInteger i = (NSInteger)[_tracks count] - 1; i >= 0; i--) {
-            if ([[[_tracks objectAtIndex:i] videoId] isEqualToString:videoId]) {
-                [_tracks removeObjectAtIndex:i];
-            }
-        }
+        el_remove_tracks_with_video_id(_tracks, videoId);
     }
     [self saveIndex];
     [self performSelectorOnMainThread:@selector(postChangedOnMain) withObject:nil waitUntilDone:NO];

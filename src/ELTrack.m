@@ -1,5 +1,10 @@
 #import "ELTrack.h"
 
+static NSString *el_string_or_default(NSDictionary *dict, NSString *key, NSString *fallback) {
+    id val = [dict objectForKey:key];
+    return [val isKindOfClass:[NSString class]] ? (NSString *)val : fallback;
+}
+
 @implementation ELTrack
 @synthesize videoId = _videoId;
 @synthesize title = _title;
@@ -40,13 +45,13 @@
     if (!el_is_valid_video_id(vid)) return nil;
     ELTrack *t = [[[ELTrack alloc] init] autorelease];
     t.videoId = vid;
-    t.title = [[dict objectForKey:@"title"] isKindOfClass:[NSString class]] ? [dict objectForKey:@"title"] : @"Untitled";
-    t.artist = [[dict objectForKey:@"artist"] isKindOfClass:[NSString class]] ? [dict objectForKey:@"artist"] : @"Unknown Artist";
-    t.album = [[dict objectForKey:@"album"] isKindOfClass:[NSString class]] ? [dict objectForKey:@"album"] : @"";
-    t.durationText = [[dict objectForKey:@"durationText"] isKindOfClass:[NSString class]] ? [dict objectForKey:@"durationText"] : @"";
+    t.title = el_string_or_default(dict, @"title", @"Untitled");
+    t.artist = el_string_or_default(dict, @"artist", @"Unknown Artist");
+    t.album = el_string_or_default(dict, @"album", @"");
+    t.durationText = el_string_or_default(dict, @"durationText", @"");
     t.durationSeconds = [[dict objectForKey:@"durationSeconds"] integerValue];
-    t.thumbURL = [[dict objectForKey:@"thumbURL"] isKindOfClass:[NSString class]] ? [dict objectForKey:@"thumbURL"] : @"";
-    t.artURL = [[dict objectForKey:@"artURL"] isKindOfClass:[NSString class]] ? [dict objectForKey:@"artURL"] : t.thumbURL;
+    t.thumbURL = el_string_or_default(dict, @"thumbURL", @"");
+    t.artURL = el_string_or_default(dict, @"artURL", t.thumbURL);
     return t;
 }
 
@@ -93,9 +98,9 @@
     if (![pid isKindOfClass:[NSString class]] || [pid length] == 0) return nil;
     ELPlaylist *p = [[[ELPlaylist alloc] init] autorelease];
     p.playlistId = pid;
-    p.title = [[dict objectForKey:@"title"] isKindOfClass:[NSString class]] ? [dict objectForKey:@"title"] : @"Playlist";
-    p.subtitle = [[dict objectForKey:@"subtitle"] isKindOfClass:[NSString class]] ? [dict objectForKey:@"subtitle"] : @"";
-    p.thumbURL = [[dict objectForKey:@"thumbURL"] isKindOfClass:[NSString class]] ? [dict objectForKey:@"thumbURL"] : @"";
+    p.title = el_string_or_default(dict, @"title", @"Playlist");
+    p.subtitle = el_string_or_default(dict, @"subtitle", @"");
+    p.thumbURL = el_string_or_default(dict, @"thumbURL", @"");
     return p;
 }
 

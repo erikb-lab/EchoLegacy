@@ -315,6 +315,23 @@ static NSInteger el_compare_cache_entry_mtime(id a, id b, void *ctx) {
     return nil;
 }
 
+- (UIImage *)fetchOrCachedImageSyncForURL:(NSString *)urlString {
+    if ([urlString length] == 0) return nil;
+    UIImage *img = [self cachedImageForURL:urlString];
+    if (img) return img;
+
+    NSData *data = [self downloadImageDataSyncForURL:urlString];
+    if (!data) return nil;
+
+    /* downloadImageDataSyncForURL already decoded and stored UIImage in _memCache */
+    img = [self memoryCachedImageForURL:urlString];
+    if (!img) {
+        img = [UIImage imageWithData:data];
+        if (img) [self storeInMemory:img forKey:urlString];
+    }
+    return img;
+}
+
 - (void)loadWorker:(NSDictionary *)info {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
     [NSThread setThreadPriority:el_image_worker_priority(NO)];
@@ -322,18 +339,7 @@ static NSInteger el_compare_cache_entry_mtime(id a, id b, void *ctx) {
     id target = [info objectForKey:@"target"];
     SEL action = NSSelectorFromString([info objectForKey:@"action"]);
 
-    UIImage *img = [self cachedImageForURL:urlString];
-    if (!img) {
-        NSData *data = [self downloadImageDataSyncForURL:urlString];
-        if (data) {
-            /* downloadImageDataSyncForURL already decoded and stored the UIImage in _memCache */
-            img = [self memoryCachedImageForURL:urlString];
-            if (!img) {
-                img = [UIImage imageWithData:data];
-                if (img) [self storeInMemory:img forKey:urlString];
-            }
-        }
-    }
+    UIImage *img = [self fetchOrCachedImageSyncForURL:urlString];
 
     @synchronized(self) {
         [_inFlight removeObject:urlString];
@@ -423,20 +429,7 @@ static NSInteger el_compare_cache_entry_mtime(id a, id b, void *ctx) {
                 rawImg = [[ELDownloadManager sharedManager] localArtImageForVideoId:videoId];
             }
             if (!rawImg && [urlString length] > 0) {
-                rawImg = [self cachedImageForURL:urlString];
-                if (!rawImg) {
-                    NSData *data = [self downloadImageDataSyncForURL:urlString];
-                    if (data) {
-                        /* downloadImageDataSyncForURL already decoded and stored UIImage in _memCache */
-                        rawImg = [self memoryCachedImageForURL:urlString];
-                        if (!rawImg) {
-                            rawImg = [UIImage imageWithData:data];
-                            if (rawImg) {
-                                [self storeInMemory:rawImg forKey:urlString];
-                            }
-                        }
-                    }
-                }
+                rawImg = [self fetchOrCachedImageSyncForURL:urlString];
             }
             if (rawImg) {
                 roundedImg = [ELTheme roundedThumbnailFromImage:rawImg size:size radius:radius cacheKey:cacheKey];

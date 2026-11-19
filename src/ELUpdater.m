@@ -168,13 +168,12 @@ static BOOL el_verify_file_size_and_sha256(NSString *path,
         return NO;
     }
 
+    BOOL verified = NO;
     mbedtls_sha256_context ctx;
     mbedtls_sha256_init(&ctx);
     if (mbedtls_sha256_starts_ret(&ctx, 0) != 0) {
-        mbedtls_sha256_free(&ctx);
-        close(fd);
         if (outError) *outError = @"SHA-256 initialization failed";
-        return NO;
+        goto cleanup;
     }
 
     uint8_t buf[16384];
@@ -182,22 +181,17 @@ static BOOL el_verify_file_size_and_sha256(NSString *path,
     ssize_t n;
     while ((n = read(fd, buf, sizeof(buf))) > 0) {
         if (mbedtls_sha256_update_ret(&ctx, buf, (size_t)n) != 0) {
-            mbedtls_sha256_free(&ctx);
-            close(fd);
             if (outError) *outError = @"SHA-256 update failed";
-            return NO;
+            goto cleanup;
         }
         totalRead += (long long)n;
     }
-    close(fd);
 
     unsigned char digest[32];
     if (n < 0 || totalRead != expectedSize || mbedtls_sha256_finish_ret(&ctx, digest) != 0) {
-        mbedtls_sha256_free(&ctx);
         if (outError) *outError = @"Failed reading update file for SHA-256 verification";
-        return NO;
+        goto cleanup;
     }
-    mbedtls_sha256_free(&ctx);
 
     static const char kHex[] = "0123456789abcdef";
     char computedHex[65];
@@ -209,9 +203,14 @@ static BOOL el_verify_file_size_and_sha256(NSString *path,
 
     if (!el_consttime_hex_eq(computedHex, [expectedSHA256 UTF8String])) {
         if (outError) *outError = @"SHA-256 checksum mismatch on downloaded update";
-        return NO;
+        goto cleanup;
     }
-    return YES;
+    verified = YES;
+
+cleanup:
+    mbedtls_sha256_free(&ctx);
+    close(fd);
+    return verified;
 }
 
 static BOOL el_validate_armv6_macho_file(NSString *path, NSString **outError) {
@@ -577,6 +576,132 @@ static void el_extract_asset_meta(NSDictionary *verJson,
     return YES;
 }
 
+- (BOOL)installBundleUpdate:(ELUpdateInfo *)info
+                  bundleDir:(NSString *)bundleDir
+                   execPath:(NSString *)execPath
+                      error:(NSString **)outError {
+    if ([info.plistURL length] == 0 || [info.cacertURL length] == 0 ||
+        !el_is_valid_sha256_hex(info.binarySHA256) ||
+        !el_is_valid_sha256_hex(info.plistSHA256) ||
+        !el_is_valid_sha256_hex(info.cacertSHA256)) {
+        if (outError) *outError = @"Incomplete SHA-256 verification metadata for bundle update";
+        return NO;
+    }
+
+    NSString *caPath = [bundleDir stringByAppendingPathComponent:@"cacert.pem"];
+    NSString *plPath = [bundleDir stringByAppendingPathComponent:@"Info.plist"];
+    NSString *tmpBin = [execPath stringByAppendingString:@".new"];
+    NSString *tmpCA  = [caPath stringByAppendingString:@".new"];
+    NSString *tmpPL  = [plPath stringByAppendingString:@".new"];
+    BOOL ok = NO;
+
+    /* 1. Download & SHA-256 verify binary, then validate armv6 Mach-O header */
+    if (![self downloadVerifiedURL:info.binaryURL
+                            toFile:tmpBin
+                          maxBytes:EL_MAX_BINARY_BYTES
+                      expectedSize:info.binarySize
+                    expectedSHA256:info.binarySHA256
+                             error:outError] ||
+        !el_validate_armv6_macho_file(tmpBin, outError)) {
+        goto cleanup;
+    }
+
+    /* 2. Download & SHA-256 verify cacert.pem, then validate X.509 certificates (Flaw #12) */
+    if (![self downloadVerifiedURL:info.cacertURL
+                            toFile:tmpCA
+                          maxBytes:EL_MAX_CACERT_BYTES
+                      expectedSize:info.cacertSize
+                    expectedSHA256:info.cacertSHA256
+                             error:outError]) {
+        goto cleanup;
+    }
+    if (![ELHTTPClient validateCACertFile:tmpCA]) {
+        if (outError) *outError = @"Downloaded cacert.pem failed X.509 certificate validation";
+        goto cleanup;
+    }
+
+    /* 3. Download & SHA-256 verify Info.plist, then validate property list structure (Flaw #12) */
+    if (![self downloadVerifiedURL:info.plistURL
+                            toFile:tmpPL
+                          maxBytes:EL_MAX_PLIST_BYTES
+                      expectedSize:info.plistSize
+                    expectedSHA256:info.plistSHA256
+                             error:outError] ||
+        !el_validate_info_plist_file(tmpPL, info.versionString, info.buildNumber, outError)) {
+        goto cleanup;
+    }
+
+    /* 4. All assets verified — set strict permissions and atomically rename into place */
+    chmod([tmpCA UTF8String], 0644);
+    chmod([tmpPL UTF8String], 0644);
+    chmod([tmpBin UTF8String], 0755);
+
+    if (rename([tmpCA UTF8String], [caPath UTF8String]) != 0 ||
+        rename([tmpPL UTF8String], [plPath UTF8String]) != 0 ||
+        rename([tmpBin UTF8String], [execPath UTF8String]) != 0) {
+        if (outError) *outError = @"Could not atomically replace verified app bundle files";
+        goto cleanup;
+    }
+
+    [ELHTTPClient reloadTrustStore];
+
+    NSString *releaseStamp = [NSString stringWithFormat:@"%@|%ld",
+                              info.versionString ? info.versionString : (info.tagName ? info.tagName : @""),
+                              (long)info.buildNumber];
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud setObject:releaseStamp forKey:kDefaultsReleaseKey];
+    if (info.releaseTitle) [ud setObject:info.releaseTitle forKey:kDefaultsReleaseTitleKey];
+    [ud synchronize];
+    ok = YES;
+
+cleanup:
+    if (!ok) {
+        unlink([tmpBin UTF8String]);
+        unlink([tmpCA UTF8String]);
+        unlink([tmpPL UTF8String]);
+    }
+    return ok;
+}
+
+- (BOOL)installIPAUpdate:(ELUpdateInfo *)info
+             fileManager:(NSFileManager *)fm
+            savedIPAPath:(NSString **)outSavedIPAPath
+                   error:(NSString **)outError {
+    if (info.ipaSize <= 0 || !el_is_valid_sha256_hex(info.ipaSHA256)) {
+        if (outError) *outError = @"Release IPA is missing required size or SHA-256 metadata";
+        return NO;
+    }
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *docs = ([paths count] > 0) ? [paths objectAtIndex:0] : NSTemporaryDirectory();
+    NSString *appDocs = [docs stringByAppendingPathComponent:@"EchoLegacy"];
+    NSString *upDir = [appDocs stringByAppendingPathComponent:@"updates"];
+    [fm createDirectoryAtPath:upDir withIntermediateDirectories:YES attributes:nil error:nil];
+    chmod([appDocs UTF8String], 0700);
+    chmod([upDir UTF8String], 0700);
+
+    NSString *ipaPath = [upDir stringByAppendingPathComponent:@"EchoLegacy.ipa"];
+    NSString *tmpIPA = [ipaPath stringByAppendingString:@".new"];
+    if (![self downloadVerifiedURL:info.ipaURL
+                            toFile:tmpIPA
+                          maxBytes:EL_MAX_IPA_BYTES
+                      expectedSize:info.ipaSize
+                    expectedSHA256:info.ipaSHA256
+                             error:outError] ||
+        !el_validate_zip_file(tmpIPA, outError)) {
+        unlink([tmpIPA UTF8String]);
+        return NO;
+    }
+
+    chmod([tmpIPA UTF8String], 0600);
+    if (rename([tmpIPA UTF8String], [ipaPath UTF8String]) != 0) {
+        unlink([tmpIPA UTF8String]);
+        if (outError) *outError = @"Could not finalize verified IPA file";
+        return NO;
+    }
+    if (outSavedIPAPath) *outSavedIPAPath = ipaPath;
+    return YES;
+}
+
 - (BOOL)installUpdate:(ELUpdateInfo *)info
           savedIPAPath:(NSString **)outSavedIPAPath
                  error:(NSString **)outError {
@@ -600,130 +725,14 @@ static void el_extract_asset_meta(NSDictionary *verJson,
     NSFileManager *fm = [[[NSFileManager alloc] init] autorelease];
     NSString *bundleDir = [[NSBundle mainBundle] bundlePath];
     NSString *execPath = [[NSBundle mainBundle] executablePath];
-    BOOL canWriteBundle = [fm isWritableFileAtPath:bundleDir];
-
-    if (canWriteBundle && [info.binaryURL length] > 0 && [execPath length] > 0) {
-        if ([info.plistURL length] == 0 || [info.cacertURL length] == 0 ||
-            !el_is_valid_sha256_hex(info.binarySHA256) ||
-            !el_is_valid_sha256_hex(info.plistSHA256) ||
-            !el_is_valid_sha256_hex(info.cacertSHA256)) {
-            if (outError) *outError = @"Incomplete SHA-256 verification metadata for bundle update";
-            return NO;
-        }
-
-        NSString *caPath = [bundleDir stringByAppendingPathComponent:@"cacert.pem"];
-        NSString *plPath = [bundleDir stringByAppendingPathComponent:@"Info.plist"];
-        NSString *tmpBin = [execPath stringByAppendingString:@".new"];
-        NSString *tmpCA  = [caPath stringByAppendingString:@".new"];
-        NSString *tmpPL  = [plPath stringByAppendingString:@".new"];
-
-        /* 1. Download & SHA-256 verify binary, then validate armv6 Mach-O header */
-        if (![self downloadVerifiedURL:info.binaryURL
-                                toFile:tmpBin
-                              maxBytes:EL_MAX_BINARY_BYTES
-                          expectedSize:info.binarySize
-                        expectedSHA256:info.binarySHA256
-                                 error:outError] ||
-            !el_validate_armv6_macho_file(tmpBin, outError)) {
-            unlink([tmpBin UTF8String]);
-            return NO;
-        }
-
-        /* 2. Download & SHA-256 verify cacert.pem, then validate X.509 certificates (Flaw #12) */
-        if (![self downloadVerifiedURL:info.cacertURL
-                                toFile:tmpCA
-                              maxBytes:EL_MAX_CACERT_BYTES
-                          expectedSize:info.cacertSize
-                        expectedSHA256:info.cacertSHA256
-                                 error:outError]) {
-            unlink([tmpBin UTF8String]);
-            unlink([tmpCA UTF8String]);
-            return NO;
-        }
-        if (![ELHTTPClient validateCACertFile:tmpCA]) {
-            unlink([tmpBin UTF8String]);
-            unlink([tmpCA UTF8String]);
-            if (outError) *outError = @"Downloaded cacert.pem failed X.509 certificate validation";
-            return NO;
-        }
-
-        /* 3. Download & SHA-256 verify Info.plist, then validate property list structure (Flaw #12) */
-        if (![self downloadVerifiedURL:info.plistURL
-                                toFile:tmpPL
-                              maxBytes:EL_MAX_PLIST_BYTES
-                          expectedSize:info.plistSize
-                        expectedSHA256:info.plistSHA256
-                                 error:outError] ||
-            !el_validate_info_plist_file(tmpPL, info.versionString, info.buildNumber, outError)) {
-            unlink([tmpBin UTF8String]);
-            unlink([tmpCA UTF8String]);
-            unlink([tmpPL UTF8String]);
-            return NO;
-        }
-
-        /* 4. All assets verified — set strict permissions and atomically rename into place */
-        chmod([tmpCA UTF8String], 0644);
-        chmod([tmpPL UTF8String], 0644);
-        chmod([tmpBin UTF8String], 0755);
-
-        if (rename([tmpCA UTF8String], [caPath UTF8String]) != 0 ||
-            rename([tmpPL UTF8String], [plPath UTF8String]) != 0 ||
-            rename([tmpBin UTF8String], [execPath UTF8String]) != 0) {
-            unlink([tmpBin UTF8String]);
-            unlink([tmpCA UTF8String]);
-            unlink([tmpPL UTF8String]);
-            if (outError) *outError = @"Could not atomically replace verified app bundle files";
-            return NO;
-        }
-
-        [ELHTTPClient reloadTrustStore];
-
-        NSString *releaseStamp = [NSString stringWithFormat:@"%@|%ld",
-                                  info.versionString ? info.versionString : (info.tagName ? info.tagName : @""),
-                                  (long)info.buildNumber];
-        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-        [ud setObject:releaseStamp forKey:kDefaultsReleaseKey];
-        if (info.releaseTitle) [ud setObject:info.releaseTitle forKey:kDefaultsReleaseTitleKey];
-        [ud synchronize];
-        return YES;
+    if ([fm isWritableFileAtPath:bundleDir] && [info.binaryURL length] > 0 && [execPath length] > 0) {
+        return [self installBundleUpdate:info bundleDir:bundleDir execPath:execPath error:outError];
     }
 
     /* Fallback when /Applications/EchoLegacy.app is root:wheel read-only:
        download and verify EchoLegacy.ipa into Documents/EchoLegacy/updates/ */
     if ([info.ipaURL length] > 0) {
-        if (info.ipaSize <= 0 || !el_is_valid_sha256_hex(info.ipaSHA256)) {
-            if (outError) *outError = @"Release IPA is missing required size or SHA-256 metadata";
-            return NO;
-        }
-        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-        NSString *docs = ([paths count] > 0) ? [paths objectAtIndex:0] : NSTemporaryDirectory();
-        NSString *appDocs = [docs stringByAppendingPathComponent:@"EchoLegacy"];
-        NSString *upDir = [appDocs stringByAppendingPathComponent:@"updates"];
-        [fm createDirectoryAtPath:upDir withIntermediateDirectories:YES attributes:nil error:nil];
-        chmod([appDocs UTF8String], 0700);
-        chmod([upDir UTF8String], 0700);
-
-        NSString *ipaPath = [upDir stringByAppendingPathComponent:@"EchoLegacy.ipa"];
-        NSString *tmpIPA = [ipaPath stringByAppendingString:@".new"];
-        if (![self downloadVerifiedURL:info.ipaURL
-                                toFile:tmpIPA
-                              maxBytes:EL_MAX_IPA_BYTES
-                          expectedSize:info.ipaSize
-                        expectedSHA256:info.ipaSHA256
-                                 error:outError] ||
-            !el_validate_zip_file(tmpIPA, outError)) {
-            unlink([tmpIPA UTF8String]);
-            return NO;
-        }
-
-        chmod([tmpIPA UTF8String], 0600);
-        if (rename([tmpIPA UTF8String], [ipaPath UTF8String]) != 0) {
-            unlink([tmpIPA UTF8String]);
-            if (outError) *outError = @"Could not finalize verified IPA file";
-            return NO;
-        }
-        if (outSavedIPAPath) *outSavedIPAPath = ipaPath;
-        return YES;
+        return [self installIPAUpdate:info fileManager:fm savedIPAPath:outSavedIPAPath error:outError];
     }
 
     if (outError) *outError = @"Bundle not writable and no verified IPA asset found";

@@ -1,8 +1,11 @@
 #import "ELHomeVC.h"
 #import "ELAudioEngine.h"
+#import "ELFeatures.h"
+#if EL_FEATURE_DOWNLOADS
 #import "ELDownloadManager.h"
+#endif
 #import "ELTheme.h"
-#import "ELTrackCell.h"
+#import "ELTrackListHelper.h"
 #import "ELYouTubeClient.h"
 
 @implementation ELHomeVC
@@ -107,34 +110,26 @@
 
     [self buildMoodChipsBar];
 
-    _tableView = [[UITableView alloc] initWithFrame:CGRectMake(0.0f, 46.0f, 320.0f, self.view.bounds.size.height - 46.0f)
-                                              style:UITableViewStylePlain];
-    _tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    _tableView.dataSource = self;
-    _tableView.delegate = self;
-    _tableView.rowHeight = 62.0f;
-    _tableView.contentInset = UIEdgeInsetsMake(0.0f, 0.0f, 56.0f, 0.0f);
-    _tableView.scrollIndicatorInsets = _tableView.contentInset;
-    [ELTheme styleTableView:_tableView];
+    _tableView = [[ELTrackListHelper createTrackTableViewWithFrame:CGRectMake(0.0f, 46.0f, 320.0f, self.view.bounds.size.height - 46.0f)
+                                                          delegate:self
+                                                         rowHeight:62.0f] retain];
     [self.view addSubview:_tableView];
 
-    _spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleWhiteLarge];
-    _spinner.center = CGPointMake(160.0f, 200.0f);
-    _spinner.hidesWhenStopped = YES;
+    _spinner = [[ELTrackListHelper createSpinnerAtCenter:CGPointMake(160.0f, 200.0f)] retain];
     [self.view addSubview:_spinner];
 
-    _emptyLabel = [[UILabel alloc] initWithFrame:CGRectMake(28.0f, 165.0f, 264.0f, 70.0f)];
-    _emptyLabel.backgroundColor = [UIColor clearColor];
-    _emptyLabel.font = [UIFont systemFontOfSize:14.0f];
-    _emptyLabel.textColor = [ELTheme textSecondaryColor];
-    _emptyLabel.textAlignment = UITextAlignmentCenter;
-    _emptyLabel.numberOfLines = 3;
+    _emptyLabel = [[ELTrackListHelper createEmptyLabelWithFrame:CGRectMake(28.0f, 165.0f, 264.0f, 70.0f)
+                                                           text:nil
+                                                       fontSize:14.0f
+                                                          lines:3] retain];
     _emptyLabel.hidden = YES;
     [self.view addSubview:_emptyLabel];
 
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reloadTable) name:ELPlayerStateChangedNotification object:nil];
+#if EL_FEATURE_DOWNLOADS
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onDownloadsChanged) name:ELDownloadsChangedNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onDownloadProgress:) name:ELDownloadProgressNotification object:nil];
+#endif
 
     [self loadCurrentMood];
 }
@@ -143,26 +138,16 @@
     [_tableView reloadData];
 }
 
-- (void)refreshVisibleCellsForVideoId:(NSString *)videoId {
-    NSArray *cells = [_tableView visibleCells];
-    for (UITableViewCell *cell in cells) {
-        if ([cell isKindOfClass:[ELTrackCell class]]) {
-            ELTrackCell *tc = (ELTrackCell *)cell;
-            if (!videoId || [tc.videoId isEqualToString:videoId]) {
-                [tc refreshDownloadState];
-            }
-        }
-    }
-}
-
+#if EL_FEATURE_DOWNLOADS
 - (void)onDownloadsChanged {
-    [self refreshVisibleCellsForVideoId:nil];
+    [ELTrackListHelper refreshVisibleTrackCellsInTableView:_tableView forVideoId:nil];
 }
 
 - (void)onDownloadProgress:(NSNotification *)note {
     NSString *vid = [[note userInfo] objectForKey:@"videoId"];
-    [self refreshVisibleCellsForVideoId:vid];
+    [ELTrackListHelper refreshVisibleTrackCellsInTableView:_tableView forVideoId:vid];
 }
+#endif
 
 - (void)onMoodTapped:(UIButton *)sender {
     if (sender.tag == _selectedMoodIndex && [_tracks count] > 0) return;
@@ -271,13 +256,8 @@
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    static NSString *cid = @"ELTrackCell";
-    ELTrackCell *cell = (ELTrackCell *)[tableView dequeueReusableCellWithIdentifier:cid];
-    if (!cell) cell = [[[ELTrackCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:cid] autorelease];
-    ELTrack *t = [_tracks objectAtIndex:indexPath.row];
-    ELTrack *cur = [[ELAudioEngine sharedEngine] currentTrack];
-    [cell configureWithTrack:t isCurrent:(cur && [cur.videoId isEqualToString:t.videoId])];
-    return cell;
+    return [ELTrackListHelper dequeueTrackCellForTableView:tableView
+                                                     track:[_tracks objectAtIndex:indexPath.row]];
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {

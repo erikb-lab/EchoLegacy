@@ -241,6 +241,54 @@ static BOOL el_keychain_write(NSString *account, NSString *value) {
     return (status == errSecSuccess);
 }
 
+static void el_migrate_secret_field(NSDictionary *d,
+                                    NSString *dictKey,
+                                    NSString *kcAccount,
+                                    NSUInteger maxLen,
+                                    NSString **ioField,
+                                    BOOL *ioNeedsScrub) {
+    if ([d objectForKey:dictKey]) *ioNeedsScrub = YES;
+    NSString *legacy = el_clean_credential_string([d objectForKey:dictKey], maxLen);
+    if ([*ioField length] == 0 && [legacy length] > 0) {
+        [*ioField release];
+        *ioField = [legacy copy];
+        el_keychain_write(kcAccount, *ioField);
+    }
+}
+
+static double el_clamp_expires_in(double expiresIn) {
+    if (expiresIn <= 0.0) return EL_DEF_TOKEN_EXPIRES_IN;
+    if (expiresIn < EL_MIN_TOKEN_EXPIRES_IN) return EL_MIN_TOKEN_EXPIRES_IN;
+    if (expiresIn > EL_MAX_TOKEN_EXPIRES_IN) return EL_MAX_TOKEN_EXPIRES_IN;
+    return expiresIn;
+}
+
+static NSString *el_oauth_error_message(NSDictionary *json, NSInteger statusCode, NSString *fallback) {
+    NSString *desc = [ELJSON string:json forKey:@"error_description"];
+    if (!desc) desc = [ELJSON string:json forKey:@"error"];
+    if (desc) return desc;
+    return fallback ? fallback : [NSString stringWithFormat:@"HTTP %ld", (long)statusCode];
+}
+
+static NSDictionary *el_post_oauth_form(NSString *url,
+                                        NSString *form,
+                                        ELHTTPResponse **outResp,
+                                        NSString **outError) {
+    NSDictionary *hdrs = [NSDictionary dictionaryWithObjectsAndKeys:
+                          @"application/x-www-form-urlencoded", @"Content-Type",
+                          nil];
+    ELHTTPResponse *resp = [[ELHTTPClient sharedClient] postURL:url
+                                                        headers:hdrs
+                                                           body:[form dataUsingEncoding:NSUTF8StringEncoding]];
+    if (outResp) *outResp = resp;
+    if (resp.errorMessage) {
+        if (outError) *outError = resp.errorMessage;
+        return nil;
+    }
+    id json = [ELJSON objectWithData:resp.body];
+    return [json isKindOfClass:[NSDictionary class]] ? (NSDictionary *)json : nil;
+}
+
 @implementation ELAuthManager
 
 + (ELAuthManager *)sharedManager {
@@ -354,28 +402,9 @@ static BOOL el_keychain_write(NSString *account, NSString *value) {
         }
 
         if ([d isKindOfClass:[NSDictionary class]]) {
-            NSString *legacyAT = el_clean_credential_string([d objectForKey:@"accessToken"], 2048);
-            NSString *legacyRT = el_clean_credential_string([d objectForKey:@"refreshToken"], 2048);
-            NSString *legacySec = el_clean_credential_string([d objectForKey:@"clientSecret"], 256);
-
-            if ([d objectForKey:@"accessToken"] || [d objectForKey:@"refreshToken"] || [d objectForKey:@"clientSecret"]) {
-                needsScrub = YES;
-            }
-            if ([_accessToken length] == 0 && [legacyAT length] > 0) {
-                [_accessToken release];
-                _accessToken = [legacyAT copy];
-                el_keychain_write(kKeychainAccountAccessToken, _accessToken);
-            }
-            if ([_refreshToken length] == 0 && [legacyRT length] > 0) {
-                [_refreshToken release];
-                _refreshToken = [legacyRT copy];
-                el_keychain_write(kKeychainAccountRefreshToken, _refreshToken);
-            }
-            if ([_clientSecret length] == 0 && [legacySec length] > 0) {
-                [_clientSecret release];
-                _clientSecret = [legacySec copy];
-                el_keychain_write(kKeychainAccountClientSecret, _clientSecret);
-            }
+            el_migrate_secret_field(d, @"accessToken",  kKeychainAccountAccessToken,  2048, &_accessToken,  &needsScrub);
+            el_migrate_secret_field(d, @"refreshToken", kKeychainAccountRefreshToken, 2048, &_refreshToken, &needsScrub);
+            el_migrate_secret_field(d, @"clientSecret", kKeychainAccountClientSecret, 256,  &_clientSecret, &needsScrub);
 
             NSNumber *ea = [d objectForKey:@"expiresAt"];
             NSString *an = el_clean_credential_string([d objectForKey:@"accountName"], 128);
@@ -490,21 +519,11 @@ static BOOL el_keychain_write(NSString *account, NSString *value) {
 
     NSString *form = [NSString stringWithFormat:@"client_id=%@&scope=%@",
                       el_url_encode(cid), el_url_encode(kOAuthScope)];
-    NSDictionary *hdrs = [NSDictionary dictionaryWithObjectsAndKeys:
-                          @"application/x-www-form-urlencoded", @"Content-Type",
-                          nil];
-    ELHTTPResponse *resp = [[ELHTTPClient sharedClient] postURL:@"https://oauth2.googleapis.com/device/code"
-                                                        headers:hdrs
-                                                           body:[form dataUsingEncoding:NSUTF8StringEncoding]];
-    if (resp.errorMessage) {
-        if (outError) *outError = resp.errorMessage;
-        return nil;
-    }
-    NSDictionary *json = [ELJSON objectWithData:resp.body];
-    if (![json isKindOfClass:[NSDictionary class]] || resp.statusCode != 200) {
-        NSString *desc = [ELJSON string:json forKey:@"error_description"];
-        if (!desc) desc = [ELJSON string:json forKey:@"error"];
-        if (outError) *outError = desc ? desc : [NSString stringWithFormat:@"HTTP %ld", (long)resp.statusCode];
+    ELHTTPResponse *resp = nil;
+    NSDictionary *json = el_post_oauth_form(@"https://oauth2.googleapis.com/device/code", form, &resp, outError);
+    if (resp.errorMessage) return nil;
+    if (!json || resp.statusCode != 200) {
+        if (outError) *outError = el_oauth_error_message(json, resp.statusCode, nil);
         return nil;
     }
 
@@ -556,18 +575,10 @@ static BOOL el_keychain_write(NSString *account, NSString *value) {
         [form appendFormat:@"&client_secret=%@", el_url_encode(csec)];
     }
 
-    NSDictionary *hdrs = [NSDictionary dictionaryWithObjectsAndKeys:
-                          @"application/x-www-form-urlencoded", @"Content-Type",
-                          nil];
-    ELHTTPResponse *resp = [[ELHTTPClient sharedClient] postURL:@"https://oauth2.googleapis.com/token"
-                                                        headers:hdrs
-                                                           body:[form dataUsingEncoding:NSUTF8StringEncoding]];
-    if (resp.errorMessage) {
-        if (outError) *outError = resp.errorMessage;
-        return ELAuthPollError;
-    }
-    NSDictionary *json = [ELJSON objectWithData:resp.body];
-    if (![json isKindOfClass:[NSDictionary class]]) {
+    ELHTTPResponse *resp = nil;
+    NSDictionary *json = el_post_oauth_form(@"https://oauth2.googleapis.com/token", form, &resp, outError);
+    if (resp.errorMessage) return ELAuthPollError;
+    if (!json) {
         if (outError) *outError = @"Invalid response from Google token endpoint";
         return ELAuthPollError;
     }
@@ -576,19 +587,13 @@ static BOOL el_keychain_write(NSString *account, NSString *value) {
     if (err) {
         if ([err isEqualToString:@"authorization_pending"]) return ELAuthPollPending;
         if ([err isEqualToString:@"slow_down"]) return ELAuthPollSlowDown;
-        if (outError) {
-            NSString *desc = [ELJSON string:json forKey:@"error_description"];
-            *outError = desc ? desc : err;
-        }
+        if (outError) *outError = el_oauth_error_message(json, resp.statusCode, err);
         return ELAuthPollDeniedOrExpired;
     }
 
     NSString *at = el_clean_credential_string([ELJSON string:json forKey:@"access_token"], 2048);
     NSString *rt = el_clean_credential_string([ELJSON string:json forKey:@"refresh_token"], 2048);
-    double expiresIn = [[ELJSON number:json forKey:@"expires_in"] doubleValue];
-    if (expiresIn <= 0.0) expiresIn = EL_DEF_TOKEN_EXPIRES_IN;
-    if (expiresIn < EL_MIN_TOKEN_EXPIRES_IN) expiresIn = EL_MIN_TOKEN_EXPIRES_IN;
-    if (expiresIn > EL_MAX_TOKEN_EXPIRES_IN) expiresIn = EL_MAX_TOKEN_EXPIRES_IN;
+    double expiresIn = el_clamp_expires_in([[ELJSON number:json forKey:@"expires_in"] doubleValue]);
 
     if ([at length] == 0) {
         if (outError) *outError = @"Missing access_token";
@@ -674,27 +679,14 @@ static BOOL el_keychain_write(NSString *account, NSString *value) {
         [form appendFormat:@"&client_secret=%@", el_url_encode(csec)];
     }
 
-    NSDictionary *hdrs = [NSDictionary dictionaryWithObjectsAndKeys:
-                          @"application/x-www-form-urlencoded", @"Content-Type",
-                          nil];
-    ELHTTPResponse *resp = [[ELHTTPClient sharedClient] postURL:@"https://oauth2.googleapis.com/token"
-                                                        headers:hdrs
-                                                           body:[form dataUsingEncoding:NSUTF8StringEncoding]];
-    if (resp.errorMessage) {
-        if (outError) *outError = resp.errorMessage;
-        return nil;
-    }
-    NSDictionary *json = [ELJSON objectWithData:resp.body];
+    ELHTTPResponse *resp = nil;
+    NSDictionary *json = el_post_oauth_form(@"https://oauth2.googleapis.com/token", form, &resp, outError);
+    if (resp.errorMessage) return nil;
     NSString *newAT = el_clean_credential_string([ELJSON string:json forKey:@"access_token"], 2048);
-    double expiresIn = [[ELJSON number:json forKey:@"expires_in"] doubleValue];
-    if (expiresIn <= 0.0) expiresIn = EL_DEF_TOKEN_EXPIRES_IN;
-    if (expiresIn < EL_MIN_TOKEN_EXPIRES_IN) expiresIn = EL_MIN_TOKEN_EXPIRES_IN;
-    if (expiresIn > EL_MAX_TOKEN_EXPIRES_IN) expiresIn = EL_MAX_TOKEN_EXPIRES_IN;
+    double expiresIn = el_clamp_expires_in([[ELJSON number:json forKey:@"expires_in"] doubleValue]);
 
     if ([newAT length] == 0) {
-        NSString *err = [ELJSON string:json forKey:@"error_description"];
-        if (!err) err = [ELJSON string:json forKey:@"error"];
-        if (outError) *outError = err ? err : @"Token refresh failed";
+        if (outError) *outError = el_oauth_error_message(json, resp.statusCode, @"Token refresh failed");
         return nil;
     }
 

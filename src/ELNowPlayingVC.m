@@ -1,52 +1,141 @@
 #import "ELNowPlayingVC.h"
 #import "ELAudioEngine.h"
+#if EL_FEATURE_DOWNLOADS
 #import "ELDownloadManager.h"
+#endif
 #import "ELImageCache.h"
+#if EL_FEATURE_LYRICS
 #import "ELLyricsClient.h"
+#endif
 #import "ELQueueVC.h"
 #import "ELTheme.h"
+#if EL_FEATURE_LIKES || EL_FEATURE_RADIO_MIX
 #import "ELYouTubeClient.h"
+#endif
 #import <math.h>
 
+#if EL_FEATURE_MARQUEE
 static const CGFloat kELMarqueeGap = 40.0f;
 static const CGFloat kELMarqueeSpeed = 32.0f;
 static const CFTimeInterval kELMarqueePause = 1.6;
 static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
+#endif
 
 @interface ELNowPlayingVC ()
+#if EL_FEATURE_MARQUEE
 - (void)startMarqueesIfVisible;
 - (void)stopMarquees;
+#endif
+#if EL_FEATURE_LYRICS
+- (void)loadLyricsForCurrentTrack;
+- (void)updateActiveLyricForTime:(double)curTime;
+#endif
 @end
 
 @implementation ELNowPlayingVC
 
+- (UIButton *)newCirclePillButtonWithFrame:(CGRect)frame
+                                        bg:(UIImage *)bg
+                                      bgHi:(UIImage *)bgHi
+                                      icon:(UIImage *)icon
+                                    action:(SEL)action {
+    UIButton *btn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
+    btn.frame = frame;
+    if (bg) [btn setBackgroundImage:bg forState:UIControlStateNormal];
+    if (bgHi) [btn setBackgroundImage:bgHi forState:UIControlStateHighlighted];
+    if (icon) [btn setImage:icon forState:UIControlStateNormal];
+    [btn addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:btn];
+    return btn;
+}
+
+- (UILabel *)newClearLabelWithFrame:(CGRect)frame
+                               font:(UIFont *)font
+                              color:(UIColor *)color
+                              align:(UITextAlignment)align
+                             parent:(UIView *)parent {
+    UILabel *lbl = [[UILabel alloc] initWithFrame:frame];
+    lbl.backgroundColor = [UIColor clearColor];
+    lbl.font = font;
+    lbl.textColor = color;
+    lbl.textAlignment = align;
+    [parent addSubview:lbl];
+    return lbl;
+}
+
+#if EL_FEATURE_MARQUEE
+- (void)setupMarqueeRowWithFrame:(CGRect)frame
+                            font:(UIFont *)font
+                           color:(UIColor *)color
+                    containerOut:(UIView **)containerOut
+                        trackOut:(UIView **)trackOut
+                        labelOut:(UILabel **)labelOut
+                        cloneOut:(UILabel **)cloneOut {
+    UIView *container = [[UIView alloc] initWithFrame:frame];
+    container.backgroundColor = [UIColor clearColor];
+    container.clipsToBounds = YES;
+    container.userInteractionEnabled = NO;
+    [self.view addSubview:container];
+
+    UIView *track = [[UIView alloc] initWithFrame:container.bounds];
+    track.backgroundColor = [UIColor clearColor];
+    [container addSubview:track];
+
+    UILabel *label = [self newClearLabelWithFrame:container.bounds font:font color:color align:UITextAlignmentLeft parent:track];
+    label.lineBreakMode = UILineBreakModeClip;
+
+    UILabel *clone = [self newClearLabelWithFrame:container.bounds font:font color:color align:UITextAlignmentLeft parent:track];
+    clone.lineBreakMode = UILineBreakModeClip;
+    clone.hidden = YES;
+
+    *containerOut = container;
+    *trackOut = track;
+    *labelOut = label;
+    *cloneOut = clone;
+}
+#endif
+
+#if EL_FEATURE_SHAKE_SHUFFLE
 - (BOOL)canBecomeFirstResponder {
     return YES;
 }
+#endif
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
+#if EL_FEATURE_SHAKE_SHUFFLE
     [self becomeFirstResponder];
+#endif
+#if EL_FEATURE_MARQUEE
     _isViewVisible = YES;
+#endif
     _lastDisplayedElapsedSec = -1;
     _lastDisplayedDurationSec = -1;
     [self refreshProgress];
+#if EL_FEATURE_MARQUEE
     [self startMarqueesIfVisible];
+#endif
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
+#if EL_FEATURE_MARQUEE
     _isViewVisible = NO;
     [self stopMarquees];
+#endif
+#if EL_FEATURE_SHAKE_SHUFFLE
     [self resignFirstResponder];
+#endif
     [super viewWillDisappear:animated];
 }
 
+#if EL_FEATURE_SHAKE_SHUFFLE
 - (void)motionEnded:(UIEventSubtype)motion withEvent:(UIEvent *)event {
     (void)event;
     if (motion == UIEventSubtypeMotionShake) {
         [[ELAudioEngine sharedEngine] handleShakeToShuffle];
     }
 }
+#endif
 
 - (void)applyBackdropColor:(UIColor *)dominant animated:(BOOL)animated {
     if (!_backdropGradient || !_artFadeLayer) return;
@@ -131,25 +220,23 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     UIImage *topCircleBg = [ELTheme circlePillImageWithSize:34.0f color:pillDark];
     UIImage *topCircleHi = [ELTheme circlePillImageWithSize:34.0f color:pillDarkHi];
 
-    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    closeBtn.frame = CGRectMake(12.0f, 10.0f, 34.0f, 34.0f);
-    [closeBtn setBackgroundImage:topCircleBg forState:UIControlStateNormal];
-    [closeBtn setBackgroundImage:topCircleHi forState:UIControlStateHighlighted];
-    [closeBtn setImage:[ELTheme iconCloseSize:20.0f color:[UIColor whiteColor]] forState:UIControlStateNormal];
-    [closeBtn addTarget:self action:@selector(onClose) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:closeBtn];
+    [[self newCirclePillButtonWithFrame:CGRectMake(12.0f, 10.0f, 34.0f, 34.0f)
+                                     bg:topCircleBg
+                                   bgHi:topCircleHi
+                                   icon:[ELTheme iconCloseSize:20.0f color:[UIColor whiteColor]]
+                                 action:@selector(onClose)] autorelease];
 
     UIImageView *sourcePillBg = [[[UIImageView alloc] initWithFrame:CGRectMake(52.0f, 16.0f, 102.0f, 22.0f)] autorelease];
     sourcePillBg.image = [ELTheme stretchablePillImageWithHeight:22.0f color:pillDark];
     [self.view addSubview:sourcePillBg];
 
-    _sourceBadge = [[UILabel alloc] initWithFrame:sourcePillBg.frame];
-    _sourceBadge.backgroundColor = [UIColor clearColor];
-    _sourceBadge.font = [UIFont boldSystemFontOfSize:10.0f];
-    _sourceBadge.textAlignment = UITextAlignmentCenter;
-    _sourceBadge.textColor = secondaryWhite;
-    [self.view addSubview:_sourceBadge];
+    _sourceBadge = [self newClearLabelWithFrame:sourcePillBg.frame
+                                           font:[UIFont boldSystemFontOfSize:10.0f]
+                                          color:secondaryWhite
+                                          align:UITextAlignmentCenter
+                                         parent:self.view];
 
+#if EL_FEATURE_LYRICS
     _lyricsBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
     _lyricsBtn.frame = CGRectMake(160.0f, 13.0f, 68.0f, 28.0f);
     [_lyricsBtn setBackgroundImage:[ELTheme stretchablePillImageWithHeight:28.0f color:pillDark] forState:UIControlStateNormal];
@@ -175,104 +262,83 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     _lyricsTable.delegate = self;
     [_lyricsContainer addSubview:_lyricsTable];
 
-    _lyricsStatusLabel = [[UILabel alloc] initWithFrame:CGRectMake(20.0f, 76.0f, 280.0f, 60.0f)];
-    _lyricsStatusLabel.backgroundColor = [UIColor clearColor];
-    _lyricsStatusLabel.font = [UIFont systemFontOfSize:14.0f];
-    _lyricsStatusLabel.textColor = secondaryWhite;
-    _lyricsStatusLabel.textAlignment = UITextAlignmentCenter;
+    _lyricsStatusLabel = [self newClearLabelWithFrame:CGRectMake(20.0f, 76.0f, 280.0f, 60.0f)
+                                                 font:[UIFont systemFontOfSize:14.0f]
+                                                color:secondaryWhite
+                                                align:UITextAlignmentCenter
+                                               parent:_lyricsContainer];
     _lyricsStatusLabel.numberOfLines = 2;
     _lyricsStatusLabel.text = @"Searching lyrics...";
-    [_lyricsContainer addSubview:_lyricsStatusLabel];
 
     _activeLyricIndex = -1;
+#endif
     _lastDisplayedElapsedSec = -1;
     _lastDisplayedDurationSec = -1;
 
-    _queueBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-    _queueBtn.frame = CGRectMake(234.0f, 10.0f, 34.0f, 34.0f);
-    [_queueBtn setBackgroundImage:topCircleBg forState:UIControlStateNormal];
-    [_queueBtn setBackgroundImage:topCircleHi forState:UIControlStateHighlighted];
-    [_queueBtn setImage:[ELTheme iconQueueSize:18.0f color:[UIColor whiteColor]] forState:UIControlStateNormal];
-    [_queueBtn addTarget:self action:@selector(onQueueTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:_queueBtn];
+    CGFloat queueX = EL_FEATURE_DOWNLOADS ? 234.0f : 274.0f;
+    _queueBtn = [self newCirclePillButtonWithFrame:CGRectMake(queueX, 10.0f, 34.0f, 34.0f)
+                                                bg:topCircleBg
+                                              bgHi:topCircleHi
+                                              icon:[ELTheme iconQueueSize:18.0f color:[UIColor whiteColor]]
+                                            action:@selector(onQueueTapped)];
 
-    _downloadBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-    _downloadBtn.frame = CGRectMake(274.0f, 10.0f, 34.0f, 34.0f);
-    [_downloadBtn setBackgroundImage:topCircleBg forState:UIControlStateNormal];
-    [_downloadBtn setBackgroundImage:topCircleHi forState:UIControlStateHighlighted];
+#if EL_FEATURE_DOWNLOADS
+    _downloadBtn = [self newCirclePillButtonWithFrame:CGRectMake(274.0f, 10.0f, 34.0f, 34.0f)
+                                                   bg:topCircleBg
+                                                 bgHi:topCircleHi
+                                                 icon:nil
+                                               action:@selector(onDownloadTapped)];
     _downloadBtn.titleLabel.font = [UIFont boldSystemFontOfSize:10.0f];
-    [_downloadBtn addTarget:self action:@selector(onDownloadTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:_downloadBtn];
+#endif
 
     /* Left-aligned bold track title & artist (with marquee scroll on overflow) + right-side (•••) Actions & Heart pills */
     UIFont *titleFont = [UIFont boldSystemFontOfSize:18.0f];
-    _titleMarqueeContainer = [[UIView alloc] initWithFrame:CGRectMake(20.0f, 268.0f, 198.0f, 24.0f)];
-    _titleMarqueeContainer.backgroundColor = [UIColor clearColor];
-    _titleMarqueeContainer.clipsToBounds = YES;
-    _titleMarqueeContainer.userInteractionEnabled = NO;
-    [self.view addSubview:_titleMarqueeContainer];
-
-    _titleTrackView = [[UIView alloc] initWithFrame:_titleMarqueeContainer.bounds];
-    _titleTrackView.backgroundColor = [UIColor clearColor];
-    [_titleMarqueeContainer addSubview:_titleTrackView];
-
-    _titleLabel = [[UILabel alloc] initWithFrame:_titleMarqueeContainer.bounds];
-    _titleLabel.backgroundColor = [UIColor clearColor];
-    _titleLabel.font = titleFont;
-    _titleLabel.textColor = [UIColor whiteColor];
-    _titleLabel.textAlignment = UITextAlignmentLeft;
-    _titleLabel.lineBreakMode = UILineBreakModeClip;
-    [_titleTrackView addSubview:_titleLabel];
-
-    _titleLabelClone = [[UILabel alloc] initWithFrame:_titleMarqueeContainer.bounds];
-    _titleLabelClone.backgroundColor = [UIColor clearColor];
-    _titleLabelClone.font = titleFont;
-    _titleLabelClone.textColor = [UIColor whiteColor];
-    _titleLabelClone.textAlignment = UITextAlignmentLeft;
-    _titleLabelClone.lineBreakMode = UILineBreakModeClip;
-    _titleLabelClone.hidden = YES;
-    [_titleTrackView addSubview:_titleLabelClone];
-
     UIFont *artistFont = [UIFont systemFontOfSize:14.0f];
-    _artistMarqueeContainer = [[UIView alloc] initWithFrame:CGRectMake(20.0f, 294.0f, 198.0f, 19.0f)];
-    _artistMarqueeContainer.backgroundColor = [UIColor clearColor];
-    _artistMarqueeContainer.clipsToBounds = YES;
-    _artistMarqueeContainer.userInteractionEnabled = NO;
-    [self.view addSubview:_artistMarqueeContainer];
+#if EL_FEATURE_MARQUEE
+    [self setupMarqueeRowWithFrame:CGRectMake(20.0f, 268.0f, 198.0f, 24.0f)
+                              font:titleFont
+                             color:[UIColor whiteColor]
+                      containerOut:&_titleMarqueeContainer
+                          trackOut:&_titleTrackView
+                          labelOut:&_titleLabel
+                          cloneOut:&_titleLabelClone];
+    [self setupMarqueeRowWithFrame:CGRectMake(20.0f, 294.0f, 198.0f, 19.0f)
+                              font:artistFont
+                             color:secondaryWhite
+                      containerOut:&_artistMarqueeContainer
+                          trackOut:&_artistTrackView
+                          labelOut:&_artistLabel
+                          cloneOut:&_artistLabelClone];
+#else
+    _titleLabel = [self newClearLabelWithFrame:CGRectMake(20.0f, 268.0f, 198.0f, 24.0f)
+                                          font:titleFont
+                                         color:[UIColor whiteColor]
+                                         align:UITextAlignmentLeft
+                                        parent:self.view];
+    _titleLabel.lineBreakMode = UILineBreakModeTailTruncation;
+    _artistLabel = [self newClearLabelWithFrame:CGRectMake(20.0f, 294.0f, 198.0f, 19.0f)
+                                           font:artistFont
+                                          color:secondaryWhite
+                                          align:UITextAlignmentLeft
+                                         parent:self.view];
+    _artistLabel.lineBreakMode = UILineBreakModeTailTruncation;
+#endif
 
-    _artistTrackView = [[UIView alloc] initWithFrame:_artistMarqueeContainer.bounds];
-    _artistTrackView.backgroundColor = [UIColor clearColor];
-    [_artistMarqueeContainer addSubview:_artistTrackView];
+#if EL_NP_HAS_MORE_MENU
+    _moreBtn = [self newCirclePillButtonWithFrame:CGRectMake(224.0f, 273.0f, 36.0f, 36.0f)
+                                               bg:[ELTheme circlePillImageWithSize:36.0f color:pillLight]
+                                             bgHi:[ELTheme circlePillImageWithSize:36.0f color:pillLightHi]
+                                             icon:[ELTheme iconMoreSize:18.0f color:[UIColor whiteColor]]
+                                           action:@selector(onMoreTapped)];
+#endif
 
-    _artistLabel = [[UILabel alloc] initWithFrame:_artistMarqueeContainer.bounds];
-    _artistLabel.backgroundColor = [UIColor clearColor];
-    _artistLabel.font = artistFont;
-    _artistLabel.textColor = secondaryWhite;
-    _artistLabel.textAlignment = UITextAlignmentLeft;
-    _artistLabel.lineBreakMode = UILineBreakModeClip;
-    [_artistTrackView addSubview:_artistLabel];
-
-    _artistLabelClone = [[UILabel alloc] initWithFrame:_artistMarqueeContainer.bounds];
-    _artistLabelClone.backgroundColor = [UIColor clearColor];
-    _artistLabelClone.font = artistFont;
-    _artistLabelClone.textColor = secondaryWhite;
-    _artistLabelClone.textAlignment = UITextAlignmentLeft;
-    _artistLabelClone.lineBreakMode = UILineBreakModeClip;
-    _artistLabelClone.hidden = YES;
-    [_artistTrackView addSubview:_artistLabelClone];
-
-    _moreBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-    _moreBtn.frame = CGRectMake(224.0f, 273.0f, 36.0f, 36.0f);
-    [_moreBtn setBackgroundImage:[ELTheme circlePillImageWithSize:36.0f color:pillLight] forState:UIControlStateNormal];
-    [_moreBtn setBackgroundImage:[ELTheme circlePillImageWithSize:36.0f color:pillLightHi] forState:UIControlStateHighlighted];
-    [_moreBtn setImage:[ELTheme iconMoreSize:18.0f color:[UIColor whiteColor]] forState:UIControlStateNormal];
-    [_moreBtn addTarget:self action:@selector(onMoreTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:_moreBtn];
-
-    _likeBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-    _likeBtn.frame = CGRectMake(266.0f, 272.0f, 38.0f, 38.0f);
-    [_likeBtn addTarget:self action:@selector(onLikeTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:_likeBtn];
+#if EL_FEATURE_LIKES
+    _likeBtn = [self newCirclePillButtonWithFrame:CGRectMake(266.0f, 272.0f, 38.0f, 38.0f)
+                                               bg:nil
+                                             bgHi:nil
+                                             icon:nil
+                                           action:@selector(onLikeTapped)];
+#endif
 
     /* Sleek rounded scrubber */
     _scrubber = [[UISlider alloc] initWithFrame:CGRectMake(20.0f, 326.0f, 280.0f, 26.0f)];
@@ -363,42 +429,57 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     _repeatOneBadge.hidden = YES;
     [_repeatBtn addSubview:_repeatOneBadge];
 
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refreshAll) name:ELPlayerStateChangedNotification object:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refreshProgress) name:ELPlayerProgressNotification object:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refreshDownloadBtn) name:ELDownloadsChangedNotification object:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refreshDownloadBtn) name:ELDownloadProgressNotification object:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onLibraryUpdated) name:ELLibraryUpdatedNotification object:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onAppDidBecomeActive) name:UIApplicationDidBecomeActiveNotification object:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onAppWillResignActive) name:UIApplicationWillResignActiveNotification object:nil];
+    NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+    [nc addObserver:self selector:@selector(refreshAll) name:ELPlayerStateChangedNotification object:nil];
+    [nc addObserver:self selector:@selector(refreshProgress) name:ELPlayerProgressNotification object:nil];
+#if EL_FEATURE_DOWNLOADS
+    [nc addObserver:self selector:@selector(refreshDownloadBtn) name:ELDownloadsChangedNotification object:nil];
+    [nc addObserver:self selector:@selector(refreshDownloadBtn) name:ELDownloadProgressNotification object:nil];
+#endif
+#if EL_FEATURE_LIKES
+    [nc addObserver:self selector:@selector(onLibraryUpdated) name:ELLibraryUpdatedNotification object:nil];
+#endif
+#if EL_FEATURE_MARQUEE
+    [nc addObserver:self selector:@selector(onAppDidBecomeActive) name:UIApplicationDidBecomeActiveNotification object:nil];
+    [nc addObserver:self selector:@selector(onAppWillResignActive) name:UIApplicationWillResignActiveNotification object:nil];
+#endif
 
     [self refreshAll];
 }
 
 - (void)releaseViewOutlets {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+#if EL_FEATURE_MARQUEE
     _isViewVisible = NO;
     [self stopMarquees];
+    [_titleMarqueeContainer release]; _titleMarqueeContainer = nil;
+    [_titleTrackView release]; _titleTrackView = nil;
+    [_titleLabelClone release]; _titleLabelClone = nil;
+    [_artistMarqueeContainer release]; _artistMarqueeContainer = nil;
+    [_artistTrackView release]; _artistTrackView = nil;
+    [_artistLabelClone release]; _artistLabelClone = nil;
+    [_lastTitleText release]; _lastTitleText = nil;
+    [_lastArtistText release]; _lastArtistText = nil;
+#endif
     [_backdropGradient release]; _backdropGradient = nil;
     [_topScrimLayer release]; _topScrimLayer = nil;
     [_artFadeLayer release]; _artFadeLayer = nil;
     [_artView release]; _artView = nil;
     [_sourceBadge release]; _sourceBadge = nil;
+#if EL_FEATURE_LYRICS
     [_lyricsBtn release]; _lyricsBtn = nil;
     [_lyricsContainer release]; _lyricsContainer = nil;
     [_lyricsTable release]; _lyricsTable = nil;
     [_lyricsStatusLabel release]; _lyricsStatusLabel = nil;
-    [_titleMarqueeContainer release]; _titleMarqueeContainer = nil;
-    [_titleTrackView release]; _titleTrackView = nil;
+#endif
     [_titleLabel release]; _titleLabel = nil;
-    [_titleLabelClone release]; _titleLabelClone = nil;
-    [_artistMarqueeContainer release]; _artistMarqueeContainer = nil;
-    [_artistTrackView release]; _artistTrackView = nil;
     [_artistLabel release]; _artistLabel = nil;
-    [_artistLabelClone release]; _artistLabelClone = nil;
-    [_lastTitleText release]; _lastTitleText = nil;
-    [_lastArtistText release]; _lastArtistText = nil;
+#if EL_NP_HAS_MORE_MENU
     [_moreBtn release]; _moreBtn = nil;
+#endif
+#if EL_FEATURE_LIKES
     [_likeBtn release]; _likeBtn = nil;
+#endif
     [_scrubber release]; _scrubber = nil;
     [_elapsedLabel release]; _elapsedLabel = nil;
     [_durationLabel release]; _durationLabel = nil;
@@ -411,7 +492,9 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     [_repeatDot release]; _repeatDot = nil;
     [_repeatOneBadge release]; _repeatOneBadge = nil;
     [_queueBtn release]; _queueBtn = nil;
+#if EL_FEATURE_DOWNLOADS
     [_downloadBtn release]; _downloadBtn = nil;
+#endif
     [_spinner release]; _spinner = nil;
     [_loadedArtKey release]; _loadedArtKey = nil;
     [_loadedArtURL release]; _loadedArtURL = nil;
@@ -424,9 +507,13 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
 
 - (void)dealloc {
     [self releaseViewOutlets];
+#if EL_FEATURE_LYRICS
     [_lyricLines release];
     [_lyricsVideoId release];
+#endif
+#if EL_FEATURE_LIKES
     [_inFlightLikeVideoId release];
+#endif
     [_currentVideoId release];
     [super dealloc];
 }
@@ -456,6 +543,7 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     }
 }
 
+#if EL_FEATURE_LIKES
 #pragma mark - Like / Unlike Flow
 
 - (void)updateLikeButtonVisual {
@@ -570,9 +658,11 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
         [self refreshLikeState];
     }
 }
+#endif
 
 #pragma mark - Downloads & Refresh
 
+#if EL_FEATURE_DOWNLOADS
 - (void)onDownloadTapped {
     ELTrack *track = [[ELAudioEngine sharedEngine] currentTrack];
     if (!track) return;
@@ -607,6 +697,7 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
         [_downloadBtn setImage:[ELTheme iconDownloadSize:18.0f color:[UIColor whiteColor]] forState:UIControlStateNormal];
     }
 }
+#endif
 
 - (void)refreshProgress {
     if (![self isViewLoaded] || !self.view.window) return;
@@ -631,11 +722,14 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
             _scrubber.value = targetVal;
         }
     }
+#if EL_FEATURE_LYRICS
     if (_showingLyrics && [_lyricLines count] > 0) {
         [self updateActiveLyricForTime:cur];
     }
+#endif
 }
 
+#if EL_FEATURE_MARQUEE
 #pragma mark - Marquee Scrolling
 
 - (void)stopMarqueeOnTrackView:(UIView *)trackView {
@@ -740,6 +834,7 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
 - (void)onAppWillResignActive {
     [self stopMarquees];
 }
+#endif
 
 - (void)setArtworkImage:(UIImage *)img forKey:(NSString *)artKey animated:(BOOL)animated {
     if (!img) img = [ELTheme placeholderArtImage];
@@ -777,9 +872,11 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     if (trackChanged) {
         [_currentVideoId release];
         _currentVideoId = [track.videoId copy];
+#if EL_FEATURE_LYRICS
         if (_showingLyrics) {
             [self loadLyricsForCurrentTrack];
         }
+#endif
     }
 
     NSString *titleText = track.title ? track.title : @"";
@@ -800,6 +897,7 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
         _sourceBadge.textColor = streamBadgeColor;
     }
 
+#if EL_FEATURE_MARQUEE
     if (!_lastTitleText || ![_lastTitleText isEqualToString:titleText]) {
         [_lastTitleText release];
         _lastTitleText = [titleText copy];
@@ -820,6 +918,10 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
                                       text:_lastArtistText
                                shouldStart:_isViewVisible];
     }
+#else
+    _titleLabel.text = titleText;
+    _artistLabel.text = artistText;
+#endif
 
     if (eng.state == ELPlayerStateLoading) {
         [_playPauseBtn setImage:nil forState:UIControlStateNormal];
@@ -833,7 +935,10 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     }
 
     /* Update full-bleed album art + dynamic dominant backdrop when artwork changes */
-    UIImage *localArt = [[ELDownloadManager sharedManager] localArtImageForVideoId:track.videoId];
+    UIImage *localArt = nil;
+#if EL_FEATURE_DOWNLOADS
+    localArt = [[ELDownloadManager sharedManager] localArtImageForVideoId:track.videoId];
+#endif
     if (localArt) {
         NSString *localKey = [NSString stringWithFormat:@"local:%@", track.videoId];
         if (![_loadedArtKey isEqualToString:localKey]) {
@@ -866,8 +971,12 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
         }
     }
 
+#if EL_FEATURE_LIKES
     [self refreshLikeState];
+#endif
+#if EL_FEATURE_DOWNLOADS
     [self refreshDownloadBtn];
+#endif
     [self refreshProgress];
 }
 
@@ -879,6 +988,7 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     }
 }
 
+#if EL_FEATURE_LYRICS
 #pragma mark - Synced Lyrics
 
 - (void)updateLyricsButtonVisual {
@@ -1043,31 +1153,46 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     }
     return cell;
 }
+#endif
 
+#if EL_NP_HAS_MORE_MENU
 #pragma mark - More Actions (Radio Mix, Sleep Timer, Download)
 
 - (void)onMoreTapped {
     ELTrack *track = [[ELAudioEngine sharedEngine] currentTrack];
     if (!track) return;
 
-    BOOL downloaded = [[ELDownloadManager sharedManager] isDownloaded:track.videoId];
-    NSString *dlTitle = downloaded ? @"Remove Offline Download" : @"Download for Offline";
+    UIActionSheet *sheet = [[[UIActionSheet alloc] initWithTitle:track.title
+                                                        delegate:self
+                                               cancelButtonTitle:nil
+                                          destructiveButtonTitle:nil
+                                               otherButtonTitles:nil] autorelease];
+    _moreRadioIdx = -1;
+    _moreSleepIdx = -1;
+    _moreDownloadIdx = -1;
 
+#if EL_FEATURE_RADIO_MIX
+    _moreRadioIdx = [sheet addButtonWithTitle:@"Start Radio Mix"];
+#endif
+#if EL_FEATURE_SLEEP_TIMER
     NSInteger rem = [[ELAudioEngine sharedEngine] sleepTimerRemainingSeconds];
     NSString *sleepTitle = (rem > 0)
         ? [NSString stringWithFormat:@"Sleep Timer (%ldm left)", (long)((rem + 59) / 60)]
         : @"Sleep Timer";
-
-    UIActionSheet *sheet = [[[UIActionSheet alloc] initWithTitle:track.title
-                                                        delegate:self
-                                               cancelButtonTitle:@"Cancel"
-                                          destructiveButtonTitle:nil
-                                               otherButtonTitles:@"Start Radio Mix", sleepTitle, dlTitle, nil] autorelease];
+    _moreSleepIdx = [sheet addButtonWithTitle:sleepTitle];
+#endif
+#if EL_FEATURE_DOWNLOADS
+    BOOL downloaded = [[ELDownloadManager sharedManager] isDownloaded:track.videoId];
+    NSString *dlTitle = downloaded ? @"Remove Offline Download" : @"Download for Offline";
+    _moreDownloadIdx = [sheet addButtonWithTitle:dlTitle];
+#endif
+    sheet.cancelButtonIndex = [sheet addButtonWithTitle:@"Cancel"];
     sheet.actionSheetStyle = UIActionSheetStyleBlackTranslucent;
     sheet.tag = 1;
     [sheet showInView:self.view];
 }
 
+#if EL_FEATURE_SLEEP_TIMER
 - (void)showSleepTimerSheet {
     UIActionSheet *sheet = [[[UIActionSheet alloc] initWithTitle:@"Sleep Timer"
                                                         delegate:self
@@ -1078,6 +1203,7 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     sheet.tag = 2;
     [sheet showInView:self.view];
 }
+#endif
 
 - (void)actionSheet:(UIActionSheet *)actionSheet clickedButtonAtIndex:(NSInteger)buttonIndex {
     if (buttonIndex == actionSheet.cancelButtonIndex) return;
@@ -1085,12 +1211,21 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     if (actionSheet.tag == 1) {
         ELTrack *track = [[ELAudioEngine sharedEngine] currentTrack];
         if (!track) return;
-        if (buttonIndex == 0) {
+#if EL_FEATURE_RADIO_MIX
+        if (buttonIndex == _moreRadioIdx) {
             [[ELAudioEngine sharedEngine] postToast:@"Starting Radio Mix..."];
             [NSThread detachNewThreadSelector:@selector(radioWorker:) toTarget:self withObject:track.videoId];
-        } else if (buttonIndex == 1) {
+            return;
+        }
+#endif
+#if EL_FEATURE_SLEEP_TIMER
+        if (buttonIndex == _moreSleepIdx) {
             [self showSleepTimerSheet];
-        } else if (buttonIndex == 2) {
+            return;
+        }
+#endif
+#if EL_FEATURE_DOWNLOADS
+        if (buttonIndex == _moreDownloadIdx) {
             ELDownloadManager *dm = [ELDownloadManager sharedManager];
             if ([dm isDownloaded:track.videoId]) {
                 [dm deleteDownloadForVideoId:track.videoId];
@@ -1100,21 +1235,24 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
                 [[ELAudioEngine sharedEngine] postToast:@"Downloading..."];
             }
             [self refreshDownloadBtn];
+            return;
         }
-    } else if (actionSheet.tag == 2) {
-        NSInteger mins = 0;
-        if (buttonIndex == 0) mins = 15;
-        else if (buttonIndex == 1) mins = 30;
-        else if (buttonIndex == 2) mins = 60;
-        else if (buttonIndex == 3) mins = 0;
+#endif
+    }
+#if EL_FEATURE_SLEEP_TIMER
+    else if (actionSheet.tag == 2) {
+        static const NSInteger kSleepOptions[] = { 15, 30, 60, 0 };
+        NSInteger mins = (buttonIndex >= 0 && buttonIndex < 4) ? kSleepOptions[buttonIndex] : 0;
         [[ELAudioEngine sharedEngine] setSleepTimerMinutes:mins];
         NSString *msg = (mins > 0)
             ? [NSString stringWithFormat:@"Sleep timer: %ld min", (long)mins]
             : @"Sleep timer off";
         [[ELAudioEngine sharedEngine] postToast:msg];
     }
+#endif
 }
 
+#if EL_FEATURE_RADIO_MIX
 - (void)radioWorker:(NSString *)videoId {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
     [NSThread setThreadPriority:0.25];
@@ -1137,5 +1275,7 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
         [[ELAudioEngine sharedEngine] postToast:(err ? err : @"Could not start Radio Mix")];
     }
 }
+#endif
+#endif
 
 @end

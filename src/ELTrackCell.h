@@ -1,4 +1,5 @@
 #import <UIKit/UIKit.h>
+#import "ELFeatures.h"
 #import "ELTrack.h"
 
 @interface ELTrackCell : UITableViewCell {
@@ -6,7 +7,9 @@
     UIImageView *_artView;
     UILabel *_titleLabel;
     UILabel *_subtitleLabel;
+#if EL_FEATURE_DOWNLOADS
     UIButton *_downloadBtn;
+#endif
     NSString *_currentVideoId;
     NSString *_currentThumbURL;
     ELTrack *_track;

@@ -15,4 +15,7 @@
 
 @property (nonatomic, retain) ELWindow *window;
 
+/* Wraps rootVC in a styled UINavigationController and appends it to tabs. */
+- (void)appendTabWithController:(UIViewController *)rootVC toArray:(NSMutableArray *)tabs;
+
 @end

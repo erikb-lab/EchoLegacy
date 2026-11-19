@@ -1,11 +1,14 @@
 #import "ELLibraryVC.h"
 #import "ELAudioEngine.h"
 #import "ELAuthManager.h"
+#import "ELFeatures.h"
+#if EL_FEATURE_DOWNLOADS
 #import "ELDownloadManager.h"
+#endif
 #import "ELImageCache.h"
 #import "ELPlaylistVC.h"
 #import "ELTheme.h"
-#import "ELTrackCell.h"
+#import "ELTrackListHelper.h"
 #import "ELYouTubeClient.h"
 
 @implementation ELLibraryVC
@@ -237,14 +240,9 @@
                                                                               target:self
                                                                               action:@selector(onSyncTapped)] autorelease];
 
-    _tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStylePlain];
-    _tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    _tableView.dataSource = self;
-    _tableView.delegate = self;
-    _tableView.rowHeight = 62.0f;
-    _tableView.contentInset = UIEdgeInsetsMake(0.0f, 0.0f, 56.0f, 0.0f);
-    _tableView.scrollIndicatorInsets = _tableView.contentInset;
-    [ELTheme styleTableView:_tableView];
+    _tableView = [[ELTrackListHelper createTrackTableViewWithFrame:self.view.bounds
+                                                          delegate:self
+                                                         rowHeight:62.0f] retain];
     [self.view addSubview:_tableView];
 
     [self buildQuickTilesHeader];
@@ -254,8 +252,10 @@
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refreshFromCache) name:ELLibraryUpdatedNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refreshFromCache) name:ELAuthStateChangedNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reloadTable) name:ELPlayerStateChangedNotification object:nil];
+#if EL_FEATURE_DOWNLOADS
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onDownloadsChanged) name:ELDownloadsChangedNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onDownloadProgress:) name:ELDownloadProgressNotification object:nil];
+#endif
 
     [self refreshFromCache];
 }
@@ -269,31 +269,25 @@
     [_tableView reloadData];
 }
 
-- (void)refreshVisibleCellsForVideoId:(NSString *)videoId {
-    NSArray *cells = [_tableView visibleCells];
-    for (UITableViewCell *cell in cells) {
-        if ([cell isKindOfClass:[ELTrackCell class]]) {
-            ELTrackCell *tc = (ELTrackCell *)cell;
-            if (!videoId || [tc.videoId isEqualToString:videoId]) {
-                [tc refreshDownloadState];
-            }
-        }
-    }
-}
-
+#if EL_FEATURE_DOWNLOADS
 - (void)onDownloadProgress:(NSNotification *)note {
     NSString *vid = [[note userInfo] objectForKey:@"videoId"];
-    [self refreshVisibleCellsForVideoId:vid];
+    [ELTrackListHelper refreshVisibleTrackCellsInTableView:_tableView forVideoId:vid];
 }
 
 - (void)onDownloadsChanged {
     [self updateQuickTiles];
-    [self refreshVisibleCellsForVideoId:nil];
+    [ELTrackListHelper refreshVisibleTrackCellsInTableView:_tableView forVideoId:nil];
 }
+#endif
 
 - (void)updateQuickTiles {
     NSUInteger likedCount = [_likedSongs count];
+#if EL_FEATURE_DOWNLOADS
     NSUInteger dlCount = [[[ELDownloadManager sharedManager] downloadedTracks] count];
+#else
+    NSUInteger dlCount = 0;
+#endif
     NSUInteger plCount = [_playlists count];
     BOOL signedIn = [[ELAuthManager sharedManager] isSignedIn];
 
@@ -349,20 +343,26 @@
 }
 
 - (void)onOpenDownloads {
+#if EL_FEATURE_DOWNLOADS
     self.tabBarController.selectedIndex = 3;
+#else
+    [[ELAudioEngine sharedEngine] postToast:@"Downloads disabled"];
+#endif
 }
 
 - (void)onShuffleQuick {
     if ([_likedSongs count] > 0) {
         [[ELAudioEngine sharedEngine] playTracksShuffled:_likedSongs];
-    } else {
-        NSArray *offline = [[ELDownloadManager sharedManager] downloadedTracks];
-        if ([offline count] > 0) {
-            [[ELAudioEngine sharedEngine] playTracksShuffled:offline];
-        } else {
-            [[ELAudioEngine sharedEngine] postToast:@"No tracks to shuffle"];
-        }
+        return;
     }
+#if EL_FEATURE_DOWNLOADS
+    NSArray *offline = [[ELDownloadManager sharedManager] downloadedTracks];
+    if ([offline count] > 0) {
+        [[ELAudioEngine sharedEngine] playTracksShuffled:offline];
+        return;
+    }
+#endif
+    [[ELAudioEngine sharedEngine] postToast:@"No tracks to shuffle"];
 }
 
 - (void)refreshFromCache {
@@ -462,17 +462,8 @@
 
 - (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
     (void)tableView;
-    UIView *v = [[[UIView alloc] initWithFrame:CGRectMake(0.0f, 0.0f, 320.0f, 28.0f)] autorelease];
-    v.backgroundColor = [ELTheme surfaceColor];
-    v.opaque = YES;
-    UILabel *lbl = [[[UILabel alloc] initWithFrame:CGRectMake(14.0f, 0.0f, 292.0f, 28.0f)] autorelease];
-    lbl.backgroundColor = [ELTheme surfaceColor];
-    lbl.opaque = YES;
-    lbl.font = [UIFont boldSystemFontOfSize:11.0f];
-    lbl.textColor = [ELTheme textSecondaryColor];
-    lbl.text = (section == 0) ? @"PLAYLISTS" : @"LIKED SONGS";
-    [v addSubview:lbl];
-    return v;
+    return [ELTrackListHelper createSectionHeaderWithTitle:(section == 0 ? @"PLAYLISTS" : @"LIKED SONGS")
+                                                    height:28.0f];
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -515,13 +506,8 @@
         return cell;
     }
 
-    static NSString *cid = @"ELTrackCell";
-    ELTrackCell *cell = (ELTrackCell *)[tableView dequeueReusableCellWithIdentifier:cid];
-    if (!cell) cell = [[[ELTrackCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:cid] autorelease];
-    ELTrack *t = [_likedSongs objectAtIndex:indexPath.row];
-    ELTrack *cur = [[ELAudioEngine sharedEngine] currentTrack];
-    [cell configureWithTrack:t isCurrent:(cur && [cur.videoId isEqualToString:t.videoId])];
-    return cell;
+    return [ELTrackListHelper dequeueTrackCellForTableView:tableView
+                                                     track:[_likedSongs objectAtIndex:indexPath.row]];
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {

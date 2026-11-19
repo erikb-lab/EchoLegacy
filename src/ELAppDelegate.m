@@ -1,13 +1,24 @@
 #import "ELAppDelegate.h"
 #import "ELAccountVC.h"
 #import "ELAudioEngine.h"
-#import "ELDownloadsVC.h"
-#import "ELHomeVC.h"
+#import "ELFeatures.h"
 #import "ELImageCache.h"
-#import "ELLibraryVC.h"
 #import "ELNowPlayingVC.h"
-#import "ELSearchVC.h"
 #import "ELTheme.h"
+#import <QuartzCore/QuartzCore.h>
+
+#if EL_FEATURE_HOME_TAB
+#import "ELHomeVC.h"
+#endif
+#if EL_FEATURE_SEARCH_TAB
+#import "ELSearchVC.h"
+#endif
+#if EL_FEATURE_LIBRARY_TAB
+#import "ELLibraryVC.h"
+#endif
+#if EL_FEATURE_DOWNLOADS
+#import "ELDownloadsVC.h"
+#endif
 
 @implementation ELWindow
 
@@ -19,65 +30,70 @@
     [[ELAudioEngine sharedEngine] handleRemoteControlEvent:event];
 }
 
+#if EL_FEATURE_SHAKE_SHUFFLE
 - (void)motionEnded:(UIEventSubtype)motion withEvent:(UIEvent *)event {
     (void)event;
     if (motion == UIEventSubtypeMotionShake) {
         [[ELAudioEngine sharedEngine] handleShakeToShuffle];
     }
 }
+#endif
 
+@end
+
+@interface ELAppDelegate ()
+- (NSArray *)buildTabViewControllers;
+- (void)setupMiniPlayerBar;
+- (void)setupToastLabel;
+- (void)setupPrivacyShieldWithBounds:(CGRect)bounds;
+- (void)clearToastTimer;
+- (void)showPrivacyShield;
+- (void)hidePrivacyShield;
 @end
 
 @implementation ELAppDelegate
 @synthesize window = _window;
 
-- (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
-    (void)launchOptions;
+- (void)appendTabWithController:(UIViewController *)rootVC toArray:(NSMutableArray *)tabs {
+    if (!rootVC || !tabs) return;
+    UINavigationController *nav = [[[UINavigationController alloc] initWithRootViewController:rootVC] autorelease];
+    [ELTheme styleNavBar:nav.navigationBar];
+    [tabs addObject:nav];
+}
 
-    [application setStatusBarStyle:UIStatusBarStyleBlackOpaque];
+- (NSArray *)buildTabViewControllers {
+    NSMutableArray *tabs = [NSMutableArray arrayWithCapacity:5];
+#if EL_FEATURE_HOME_TAB
+    [self appendTabWithController:[[[ELHomeVC alloc] init] autorelease] toArray:tabs];
+#endif
+#if EL_FEATURE_SEARCH_TAB
+    [self appendTabWithController:[[[ELSearchVC alloc] init] autorelease] toArray:tabs];
+#endif
+#if EL_FEATURE_LIBRARY_TAB
+    [self appendTabWithController:[[[ELLibraryVC alloc] init] autorelease] toArray:tabs];
+#endif
+#if EL_FEATURE_DOWNLOADS
+    [self appendTabWithController:[[[ELDownloadsVC alloc] init] autorelease] toArray:tabs];
+#endif
+    /* Account stays mounted so sign-in and diagnostics remain reachable even if other tabs are disabled. */
+    [self appendTabWithController:[[[ELAccountVC alloc] init] autorelease] toArray:tabs];
+    return tabs;
+}
 
-    [ELAudioEngine sharedEngine];
-    [application beginReceivingRemoteControlEvents];
-
-    CGRect bounds = [[UIScreen mainScreen] bounds];
-    _window = [[ELWindow alloc] initWithFrame:bounds];
-    _window.backgroundColor = [ELTheme backgroundColor];
-
-    ELHomeVC *homeVC = [[[ELHomeVC alloc] init] autorelease];
-    ELSearchVC *searchVC = [[[ELSearchVC alloc] init] autorelease];
-    ELLibraryVC *libVC = [[[ELLibraryVC alloc] init] autorelease];
-    ELDownloadsVC *dlVC = [[[ELDownloadsVC alloc] init] autorelease];
-    ELAccountVC *acctVC = [[[ELAccountVC alloc] init] autorelease];
-
-    UINavigationController *homeNav = [[[UINavigationController alloc] initWithRootViewController:homeVC] autorelease];
-    UINavigationController *searchNav = [[[UINavigationController alloc] initWithRootViewController:searchVC] autorelease];
-    UINavigationController *libNav = [[[UINavigationController alloc] initWithRootViewController:libVC] autorelease];
-    UINavigationController *dlNav = [[[UINavigationController alloc] initWithRootViewController:dlVC] autorelease];
-    UINavigationController *acctNav = [[[UINavigationController alloc] initWithRootViewController:acctVC] autorelease];
-
-    [ELTheme styleNavBar:homeNav.navigationBar];
-    [ELTheme styleNavBar:searchNav.navigationBar];
-    [ELTheme styleNavBar:libNav.navigationBar];
-    [ELTheme styleNavBar:dlNav.navigationBar];
-    [ELTheme styleNavBar:acctNav.navigationBar];
-
-    _tabBarController = [[UITabBarController alloc] init];
-    _tabBarController.viewControllers = [NSArray arrayWithObjects:homeNav, searchNav, libNav, dlNav, acctNav, nil];
-    _tabBarController.selectedIndex = 0;
-
-    [_window addSubview:_tabBarController.view];
-
+- (void)setupMiniPlayerBar {
     /* Persistent Mini-Player Bar pinned directly above the 49px UITabBar */
     CGFloat tabBarH = 49.0f;
     CGFloat miniH = 52.0f;
     CGRect tbBounds = _tabBarController.view.bounds;
-    _miniPlayerBar = [[ELMiniPlayerBar alloc] initWithFrame:CGRectMake(0, tbBounds.size.height - tabBarH - miniH, tbBounds.size.width, miniH)];
+    _miniPlayerBar = [[ELMiniPlayerBar alloc] initWithFrame:CGRectMake(0.0f, tbBounds.size.height - tabBarH - miniH, tbBounds.size.width, miniH)];
     _miniPlayerBar.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
     _miniPlayerBar.delegate = self;
     [_tabBarController.view addSubview:_miniPlayerBar];
+}
 
+- (void)setupToastLabel {
     /* Floating dark toast pill for Shake-to-Shuffle / Shuffle / Repeat feedback */
-    _toastLabel = [[UILabel alloc] initWithFrame:CGRectMake(40, 32, 240, 30)];
+    _toastLabel = [[UILabel alloc] initWithFrame:CGRectMake(40.0f, 32.0f, 240.0f, 30.0f)];
     _toastLabel.backgroundColor = [UIColor colorWithRed:0.12f green:0.12f blue:0.17f alpha:0.94f];
     _toastLabel.layer.cornerRadius = 15.0f;
     _toastLabel.layer.borderColor = [[ELTheme accentColor] CGColor];
@@ -89,13 +105,16 @@
     _toastLabel.alpha = 0.0f;
     _toastLabel.userInteractionEnabled = NO;
     [_window addSubview:_toastLabel];
+}
 
+- (void)setupPrivacyShieldWithBounds:(CGRect)bounds {
     /* Opaque full-screen privacy shield to prevent iOS app-switcher snapshots from capturing OAuth codes */
     _privacyShieldView = [[UIView alloc] initWithFrame:bounds];
     _privacyShieldView.backgroundColor = [ELTheme backgroundColor];
     _privacyShieldView.opaque = YES;
     _privacyShieldView.hidden = YES;
     _privacyShieldView.userInteractionEnabled = NO;
+
     UILabel *shieldTitle = [[[UILabel alloc] initWithFrame:CGRectMake(20.0f, 210.0f, 280.0f, 40.0f)] autorelease];
     shieldTitle.backgroundColor = [UIColor clearColor];
     shieldTitle.font = [UIFont boldSystemFontOfSize:24.0f];
@@ -104,6 +123,27 @@
     shieldTitle.text = @"EchoLegacy";
     [_privacyShieldView addSubview:shieldTitle];
     [_window addSubview:_privacyShieldView];
+}
+
+- (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
+    (void)launchOptions;
+
+    [application setStatusBarStyle:UIStatusBarStyleBlackOpaque];
+    [ELAudioEngine sharedEngine];
+    [application beginReceivingRemoteControlEvents];
+
+    CGRect bounds = [[UIScreen mainScreen] bounds];
+    _window = [[ELWindow alloc] initWithFrame:bounds];
+    _window.backgroundColor = [ELTheme backgroundColor];
+
+    _tabBarController = [[UITabBarController alloc] init];
+    _tabBarController.viewControllers = [self buildTabViewControllers];
+    _tabBarController.selectedIndex = 0;
+    [_window addSubview:_tabBarController.view];
+
+    [self setupMiniPlayerBar];
+    [self setupToastLabel];
+    [self setupPrivacyShieldWithBounds:bounds];
 
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(onToastNotification:)
@@ -115,15 +155,19 @@
     return YES;
 }
 
-- (void)onToastNotification:(NSNotification *)note {
-    NSString *msg = [[note userInfo] objectForKey:@"message"];
-    if ([msg length] == 0) return;
-    _toastLabel.text = msg;
-    [_window bringSubviewToFront:_toastLabel];
-
+- (void)clearToastTimer {
     [_toastTimer invalidate];
     [_toastTimer release];
     _toastTimer = nil;
+}
+
+- (void)onToastNotification:(NSNotification *)note {
+    NSString *msg = [[note userInfo] objectForKey:@"message"];
+    if ([msg length] == 0) return;
+
+    _toastLabel.text = msg;
+    [_window bringSubviewToFront:_toastLabel];
+    [self clearToastTimer];
 
     [UIView beginAnimations:@"toastIn" context:NULL];
     [UIView setAnimationDuration:0.18];
@@ -138,9 +182,7 @@
 }
 
 - (void)hideToast {
-    [_toastTimer invalidate];
-    [_toastTimer release];
-    _toastTimer = nil;
+    [self clearToastTimer];
 
     [UIView beginAnimations:@"toastOut" context:NULL];
     [UIView setAnimationDuration:0.25];
@@ -201,8 +243,7 @@
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
-    [_toastTimer invalidate];
-    [_toastTimer release];
+    [self clearToastTimer];
     [_privacyShieldView release];
     [_toastLabel release];
     [_miniPlayerBar release];

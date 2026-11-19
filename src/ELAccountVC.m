@@ -4,12 +4,59 @@
 #import "ELHTTPClient.h"
 #import "ELImageCache.h"
 #import "ELTheme.h"
+#if EL_FEATURE_OTA_UPDATER
 #import "ELUpdater.h"
+#endif
 #import "ELYouTubeClient.h"
 
+#if EL_FEATURE_LYRICS
 static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
+#endif
 
 @implementation ELAccountVC
+
+- (UIView *)newCardWithFrame:(CGRect)frame {
+    UIView *card = [[UIView alloc] initWithFrame:frame];
+    card.backgroundColor = [ELTheme surfaceColor];
+    card.layer.cornerRadius = 12.0f;
+    card.layer.masksToBounds = YES;
+    [_scrollView addSubview:card];
+    return card;
+}
+
+- (UILabel *)newLabelWithFrame:(CGRect)frame font:(UIFont *)font color:(UIColor *)color lines:(NSInteger)lines parent:(UIView *)parent {
+    UILabel *lbl = [[UILabel alloc] initWithFrame:frame];
+    lbl.backgroundColor = [UIColor clearColor];
+    lbl.font = font;
+    lbl.textColor = color;
+    if (lines != 1) lbl.numberOfLines = lines;
+    [parent addSubview:lbl];
+    return lbl;
+}
+
+- (UITextField *)newOAuthFieldWithFrame:(CGRect)frame placeholder:(NSString *)placeholder secure:(BOOL)secure parent:(UIView *)parent {
+    UITextField *tf = [[UITextField alloc] initWithFrame:frame];
+    tf.backgroundColor = [ELTheme backgroundColor];
+    tf.textColor = [ELTheme textPrimaryColor];
+    tf.font = [UIFont systemFontOfSize:12.0f];
+    tf.placeholder = placeholder;
+    tf.contentVerticalAlignment = UIControlContentVerticalAlignmentCenter;
+    tf.borderStyle = UITextBorderStyleRoundedRect;
+    tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+    tf.secureTextEntry = secure;
+    tf.autocorrectionType = UITextAutocorrectionTypeNo;
+    tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    tf.returnKeyType = UIReturnKeyDone;
+    tf.delegate = self;
+    [parent addSubview:tf];
+    return tf;
+}
+
+- (void)addSeparatorAtY:(CGFloat)y toView:(UIView *)parent {
+    UIView *div = [[[UIView alloc] initWithFrame:CGRectMake(16.0f, y, 256.0f, 1.0f)] autorelease];
+    div.backgroundColor = [ELTheme separatorColor];
+    [parent addSubview:div];
+}
 
 - (id)init {
     self = [super init];
@@ -48,13 +95,19 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
     [_codePollLabel release]; _codePollLabel = nil;
     [_spinner release]; _spinner = nil;
     [_prefsCard release]; _prefsCard = nil;
+#if EL_FEATURE_SHAKE_SHUFFLE
     [_shakeSwitch release]; _shakeSwitch = nil;
+#endif
+#if EL_FEATURE_LYRICS
     [_lyricsSwitch release]; _lyricsSwitch = nil;
+#endif
     [_cacheLabel release]; _cacheLabel = nil;
     [_clearCacheBtn release]; _clearCacheBtn = nil;
+#if EL_FEATURE_OTA_UPDATER
     [_updateCard release]; _updateCard = nil;
     [_updateStatusLabel release]; _updateStatusLabel = nil;
     [_updateBtn release]; _updateBtn = nil;
+#endif
 }
 
 - (void)viewDidUnload {
@@ -66,7 +119,9 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
     _pollSession++;
     [self releaseViewOutlets];
     [_currentUserCode release];
+#if EL_FEATURE_OTA_UPDATER
     [_pendingUpdate release];
+#endif
     [super dealloc];
 }
 
@@ -82,29 +137,23 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
     [self.view addSubview:_scrollView];
 
     /* 1. Google Account Status Card */
-    UIView *card = [[[UIView alloc] initWithFrame:CGRectMake(16, 14, 288, 150)] autorelease];
-    card.backgroundColor = [ELTheme surfaceColor];
-    card.layer.cornerRadius = 12.0f;
-    card.layer.masksToBounds = YES;
-    [_scrollView addSubview:card];
+    UIView *card = [[self newCardWithFrame:CGRectMake(16, 14, 288, 150)] autorelease];
 
     _statusDot = [[UIView alloc] initWithFrame:CGRectMake(16, 20, 10, 10)];
     _statusDot.layer.cornerRadius = 5.0f;
     _statusDot.layer.masksToBounds = YES;
     [card addSubview:_statusDot];
 
-    _accountTitleLabel = [[UILabel alloc] initWithFrame:CGRectMake(34, 13, 238, 24)];
-    _accountTitleLabel.backgroundColor = [UIColor clearColor];
-    _accountTitleLabel.font = [UIFont boldSystemFontOfSize:17.0f];
-    _accountTitleLabel.textColor = [ELTheme textPrimaryColor];
-    [card addSubview:_accountTitleLabel];
-
-    _accountSubLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 42, 256, 36)];
-    _accountSubLabel.backgroundColor = [UIColor clearColor];
-    _accountSubLabel.font = [UIFont systemFontOfSize:12.0f];
-    _accountSubLabel.textColor = [ELTheme textSecondaryColor];
-    _accountSubLabel.numberOfLines = 2;
-    [card addSubview:_accountSubLabel];
+    _accountTitleLabel = [self newLabelWithFrame:CGRectMake(34, 13, 238, 24)
+                                            font:[UIFont boldSystemFontOfSize:17.0f]
+                                           color:[ELTheme textPrimaryColor]
+                                           lines:1
+                                          parent:card];
+    _accountSubLabel = [self newLabelWithFrame:CGRectMake(16, 42, 256, 36)
+                                          font:[UIFont systemFontOfSize:12.0f]
+                                         color:[ELTheme textSecondaryColor]
+                                         lines:2
+                                        parent:card];
 
     _primaryBtn = [[ELTheme pillButtonWithTitle:@"Sign In with Google"
                                           color:[ELTheme accentColor]
@@ -120,48 +169,24 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
     [_scrollView addSubview:_secondaryBtn];
 
     /* User-Supplied OAuth Client ID & Secret Configuration Card (Flaw #3) */
-    _oauthCard = [[UIView alloc] initWithFrame:CGRectMake(16, 218, 288, 162)];
-    _oauthCard.backgroundColor = [ELTheme surfaceColor];
-    _oauthCard.layer.cornerRadius = 12.0f;
-    _oauthCard.layer.masksToBounds = YES;
+    _oauthCard = [self newCardWithFrame:CGRectMake(16, 218, 288, 162)];
     _oauthCard.hidden = YES;
-    [_scrollView addSubview:_oauthCard];
 
-    UILabel *oaTitle = [[[UILabel alloc] initWithFrame:CGRectMake(14, 10, 260, 16)] autorelease];
-    oaTitle.backgroundColor = [UIColor clearColor];
-    oaTitle.font = [UIFont boldSystemFontOfSize:11.0f];
-    oaTitle.textColor = [ELTheme textSecondaryColor];
+    UILabel *oaTitle = [[self newLabelWithFrame:CGRectMake(14, 10, 260, 16)
+                                           font:[UIFont boldSystemFontOfSize:11.0f]
+                                          color:[ELTheme textSecondaryColor]
+                                          lines:1
+                                         parent:_oauthCard] autorelease];
     oaTitle.text = @"GOOGLE OAUTH CLIENT (TV / DEVICE FLOW)";
-    [_oauthCard addSubview:oaTitle];
 
-    _clientIdField = [[UITextField alloc] initWithFrame:CGRectMake(14, 32, 260, 32)];
-    _clientIdField.backgroundColor = [ELTheme backgroundColor];
-    _clientIdField.textColor = [ELTheme textPrimaryColor];
-    _clientIdField.font = [UIFont systemFontOfSize:12.0f];
-    _clientIdField.placeholder = @"Client ID (.apps.googleusercontent.com)";
-    _clientIdField.contentVerticalAlignment = UIControlContentVerticalAlignmentCenter;
-    _clientIdField.borderStyle = UITextBorderStyleRoundedRect;
-    _clientIdField.clearButtonMode = UITextFieldViewModeWhileEditing;
-    _clientIdField.autocorrectionType = UITextAutocorrectionTypeNo;
-    _clientIdField.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    _clientIdField.returnKeyType = UIReturnKeyDone;
-    _clientIdField.delegate = self;
-    [_oauthCard addSubview:_clientIdField];
-
-    _clientSecretField = [[UITextField alloc] initWithFrame:CGRectMake(14, 72, 260, 32)];
-    _clientSecretField.backgroundColor = [ELTheme backgroundColor];
-    _clientSecretField.textColor = [ELTheme textPrimaryColor];
-    _clientSecretField.font = [UIFont systemFontOfSize:12.0f];
-    _clientSecretField.placeholder = @"Client Secret (optional, Keychain)";
-    _clientSecretField.contentVerticalAlignment = UIControlContentVerticalAlignmentCenter;
-    _clientSecretField.borderStyle = UITextBorderStyleRoundedRect;
-    _clientSecretField.clearButtonMode = UITextFieldViewModeWhileEditing;
-    _clientSecretField.secureTextEntry = YES;
-    _clientSecretField.autocorrectionType = UITextAutocorrectionTypeNo;
-    _clientSecretField.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    _clientSecretField.returnKeyType = UIReturnKeyDone;
-    _clientSecretField.delegate = self;
-    [_oauthCard addSubview:_clientSecretField];
+    _clientIdField = [self newOAuthFieldWithFrame:CGRectMake(14, 32, 260, 32)
+                                      placeholder:@"Client ID (.apps.googleusercontent.com)"
+                                           secure:NO
+                                           parent:_oauthCard];
+    _clientSecretField = [self newOAuthFieldWithFrame:CGRectMake(14, 72, 260, 32)
+                                          placeholder:@"Client Secret (optional, Keychain)"
+                                               secure:YES
+                                               parent:_oauthCard];
 
     _saveOAuthBtn = [[ELTheme pillButtonWithTitle:@"Save OAuth Credentials"
                                             color:[ELTheme accentColor]
@@ -171,29 +196,25 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
     [_oauthCard addSubview:_saveOAuthBtn];
 
     /* Device OAuth Code Card (shown during sign-in, masked by default - Flaw #22) */
-    _codeCard = [[UIView alloc] initWithFrame:CGRectMake(16, 218, 288, 160)];
-    _codeCard.backgroundColor = [ELTheme surfaceColor];
-    _codeCard.layer.cornerRadius = 12.0f;
-    _codeCard.layer.masksToBounds = YES;
+    _codeCard = [self newCardWithFrame:CGRectMake(16, 218, 288, 160)];
     _codeCard.hidden = YES;
-    [_scrollView addSubview:_codeCard];
 
-    _codeHintLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 10, 260, 38)];
-    _codeHintLabel.backgroundColor = [UIColor clearColor];
-    _codeHintLabel.font = [UIFont systemFontOfSize:11.0f];
-    _codeHintLabel.textColor = [ELTheme textSecondaryColor];
+    _codeHintLabel = [self newLabelWithFrame:CGRectMake(14, 10, 260, 38)
+                                        font:[UIFont systemFontOfSize:11.0f]
+                                       color:[ELTheme textSecondaryColor]
+                                       lines:2
+                                      parent:_codeCard];
     _codeHintLabel.textAlignment = UITextAlignmentCenter;
-    _codeHintLabel.numberOfLines = 2;
-    [_codeCard addSubview:_codeHintLabel];
 
-    _codeValueLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 54, 260, 44)];
+    _codeValueLabel = [self newLabelWithFrame:CGRectMake(14, 54, 260, 44)
+                                         font:[UIFont boldSystemFontOfSize:20.0f]
+                                        color:[ELTheme textPrimaryColor]
+                                        lines:1
+                                       parent:_codeCard];
     _codeValueLabel.backgroundColor = [ELTheme backgroundColor];
     _codeValueLabel.layer.cornerRadius = 8.0f;
     _codeValueLabel.layer.masksToBounds = YES;
-    _codeValueLabel.font = [UIFont boldSystemFontOfSize:20.0f];
-    _codeValueLabel.textColor = [ELTheme textPrimaryColor];
     _codeValueLabel.textAlignment = UITextAlignmentCenter;
-    [_codeCard addSubview:_codeValueLabel];
 
     _codeRevealBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
     _codeRevealBtn.frame = _codeValueLabel.frame;
@@ -205,108 +226,106 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
     _spinner.hidesWhenStopped = YES;
     [_codeCard addSubview:_spinner];
 
-    _codePollLabel = [[UILabel alloc] initWithFrame:CGRectMake(48, 110, 226, 30)];
-    _codePollLabel.backgroundColor = [UIColor clearColor];
-    _codePollLabel.font = [UIFont systemFontOfSize:12.0f];
-    _codePollLabel.textColor = [ELTheme textSecondaryColor];
-    _codePollLabel.numberOfLines = 2;
-    [_codeCard addSubview:_codePollLabel];
+    _codePollLabel = [self newLabelWithFrame:CGRectMake(48, 110, 226, 30)
+                                        font:[UIFont systemFontOfSize:12.0f]
+                                       color:[ELTheme textSecondaryColor]
+                                       lines:2
+                                      parent:_codeCard];
 
     /* 2. Playback, Privacy & Storage Preferences Card (Flaw #9) */
-    _prefsCard = [[UIView alloc] initWithFrame:CGRectMake(16, 224, 288, 192)];
-    _prefsCard.backgroundColor = [ELTheme surfaceColor];
-    _prefsCard.layer.cornerRadius = 12.0f;
-    _prefsCard.layer.masksToBounds = YES;
-    [_scrollView addSubview:_prefsCard];
+    _prefsCard = [self newCardWithFrame:CGRectMake(16, 224, 288, 192)];
 
-    UILabel *pTitle = [[[UILabel alloc] initWithFrame:CGRectMake(16, 12, 256, 18)] autorelease];
-    pTitle.backgroundColor = [UIColor clearColor];
-    pTitle.font = [UIFont boldSystemFontOfSize:12.0f];
-    pTitle.textColor = [ELTheme textSecondaryColor];
+    UILabel *pTitle = [[self newLabelWithFrame:CGRectMake(16, 12, 256, 18)
+                                          font:[UIFont boldSystemFontOfSize:12.0f]
+                                         color:[ELTheme textSecondaryColor]
+                                         lines:1
+                                        parent:_prefsCard] autorelease];
     pTitle.text = @"PLAYBACK, PRIVACY & STORAGE";
-    [_prefsCard addSubview:pTitle];
 
-    UILabel *shakeLbl = [[[UILabel alloc] initWithFrame:CGRectMake(16, 40, 165, 24)] autorelease];
-    shakeLbl.backgroundColor = [UIColor clearColor];
-    shakeLbl.font = [UIFont boldSystemFontOfSize:14.0f];
-    shakeLbl.textColor = [ELTheme textPrimaryColor];
+    CGFloat py = 38.0f;
+#if EL_FEATURE_SHAKE_SHUFFLE
+    UILabel *shakeLbl = [[self newLabelWithFrame:CGRectMake(16, py + 2.0f, 165, 24)
+                                            font:[UIFont boldSystemFontOfSize:14.0f]
+                                           color:[ELTheme textPrimaryColor]
+                                           lines:1
+                                          parent:_prefsCard] autorelease];
     shakeLbl.text = @"Shake to Shuffle";
-    [_prefsCard addSubview:shakeLbl];
 
-    _shakeSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(184, 38, 94, 27)];
+    _shakeSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(184, py, 94, 27)];
     _shakeSwitch.on = [[ELAudioEngine sharedEngine] shakeToShuffleEnabled];
     [_shakeSwitch addTarget:self action:@selector(onShakeToggled) forControlEvents:UIControlEventValueChanged];
     [_prefsCard addSubview:_shakeSwitch];
 
-    UIView *div1 = [[[UIView alloc] initWithFrame:CGRectMake(16, 74, 256, 1)] autorelease];
-    div1.backgroundColor = [ELTheme separatorColor];
-    [_prefsCard addSubview:div1];
+    py += 36.0f;
+    [self addSeparatorAtY:py toView:_prefsCard];
+    py += 8.0f;
+#endif
 
-    UILabel *lyricsLbl = [[[UILabel alloc] initWithFrame:CGRectMake(16, 82, 165, 18)] autorelease];
-    lyricsLbl.backgroundColor = [UIColor clearColor];
-    lyricsLbl.font = [UIFont boldSystemFontOfSize:13.0f];
-    lyricsLbl.textColor = [ELTheme textPrimaryColor];
+#if EL_FEATURE_LYRICS
+    UILabel *lyricsLbl = [[self newLabelWithFrame:CGRectMake(16, py, 165, 18)
+                                             font:[UIFont boldSystemFontOfSize:13.0f]
+                                            color:[ELTheme textPrimaryColor]
+                                            lines:1
+                                           parent:_prefsCard] autorelease];
     lyricsLbl.text = @"Online Lyrics";
-    [_prefsCard addSubview:lyricsLbl];
 
-    UILabel *lyricsSub = [[[UILabel alloc] initWithFrame:CGRectMake(16, 100, 165, 16)] autorelease];
-    lyricsSub.backgroundColor = [UIColor clearColor];
-    lyricsSub.font = [UIFont systemFontOfSize:10.0f];
-    lyricsSub.textColor = [ELTheme textSecondaryColor];
+    UILabel *lyricsSub = [[self newLabelWithFrame:CGRectMake(16, py + 18.0f, 165, 16)
+                                             font:[UIFont systemFontOfSize:10.0f]
+                                            color:[ELTheme textSecondaryColor]
+                                            lines:1
+                                           parent:_prefsCard] autorelease];
     lyricsSub.text = @"Query lrclib.net for track lyrics";
-    [_prefsCard addSubview:lyricsSub];
 
-    _lyricsSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(184, 86, 94, 27)];
+    _lyricsSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(184, py + 4.0f, 94, 27)];
     _lyricsSwitch.on = [[NSUserDefaults standardUserDefaults] boolForKey:kOnlineLyricsDefaultsKey];
     [_lyricsSwitch addTarget:self action:@selector(onLyricsToggled) forControlEvents:UIControlEventValueChanged];
     [_prefsCard addSubview:_lyricsSwitch];
 
-    UIView *div2 = [[[UIView alloc] initWithFrame:CGRectMake(16, 128, 256, 1)] autorelease];
-    div2.backgroundColor = [ELTheme separatorColor];
-    [_prefsCard addSubview:div2];
+    py += 46.0f;
+    [self addSeparatorAtY:py toView:_prefsCard];
+    py += 13.0f;
+#endif
 
-    _cacheLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 141, 152, 34)];
-    _cacheLabel.backgroundColor = [UIColor clearColor];
-    _cacheLabel.font = [UIFont systemFontOfSize:12.0f];
-    _cacheLabel.textColor = [ELTheme textSecondaryColor];
-    _cacheLabel.numberOfLines = 2;
-    [_prefsCard addSubview:_cacheLabel];
+    _cacheLabel = [self newLabelWithFrame:CGRectMake(16, py, 152, 34)
+                                     font:[UIFont systemFontOfSize:12.0f]
+                                    color:[ELTheme textSecondaryColor]
+                                    lines:2
+                                   parent:_prefsCard];
 
     _clearCacheBtn = [[ELTheme pillButtonWithTitle:@"Clear Cache"
                                              color:[ELTheme surfaceHighlightColor]
-                                             frame:CGRectMake(174, 142, 98, 32)] retain];
+                                             frame:CGRectMake(174, py + 1.0f, 98, 32)] retain];
     _clearCacheBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12.0f];
     [_clearCacheBtn addTarget:self action:@selector(onClearCacheTapped) forControlEvents:UIControlEventTouchUpInside];
     [_prefsCard addSubview:_clearCacheBtn];
 
+    _prefsCard.frame = CGRectMake(16, 224, 288, py + 51.0f);
+
+#if EL_FEATURE_OTA_UPDATER
     /* 3. GitHub Updates Card */
-    _updateCard = [[UIView alloc] initWithFrame:CGRectMake(16, 428, 288, 122)];
-    _updateCard.backgroundColor = [ELTheme surfaceColor];
-    _updateCard.layer.cornerRadius = 12.0f;
-    _updateCard.layer.masksToBounds = YES;
-    [_scrollView addSubview:_updateCard];
+    _updateCard = [self newCardWithFrame:CGRectMake(16, 428, 288, 122)];
 
-    UILabel *uTitle = [[[UILabel alloc] initWithFrame:CGRectMake(16, 12, 256, 18)] autorelease];
-    uTitle.backgroundColor = [UIColor clearColor];
-    uTitle.font = [UIFont boldSystemFontOfSize:12.0f];
-    uTitle.textColor = [ELTheme textSecondaryColor];
+    UILabel *uTitle = [[self newLabelWithFrame:CGRectMake(16, 12, 256, 18)
+                                          font:[UIFont boldSystemFontOfSize:12.0f]
+                                         color:[ELTheme textSecondaryColor]
+                                         lines:1
+                                        parent:_updateCard] autorelease];
     uTitle.text = @"GITHUB UPDATES";
-    [_updateCard addSubview:uTitle];
 
-    _updateStatusLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 34, 256, 34)];
-    _updateStatusLabel.backgroundColor = [UIColor clearColor];
-    _updateStatusLabel.font = [UIFont systemFontOfSize:12.0f];
-    _updateStatusLabel.textColor = [ELTheme textPrimaryColor];
-    _updateStatusLabel.numberOfLines = 2;
+    _updateStatusLabel = [self newLabelWithFrame:CGRectMake(16, 34, 256, 34)
+                                            font:[UIFont systemFontOfSize:12.0f]
+                                           color:[ELTheme textPrimaryColor]
+                                           lines:2
+                                          parent:_updateCard];
     _updateStatusLabel.text = [NSString stringWithFormat:@"Installed: %@\nTap below to check GitHub Releases.",
                                [[ELUpdater sharedUpdater] installedVersionLabel]];
-    [_updateCard addSubview:_updateStatusLabel];
 
     _updateBtn = [[ELTheme pillButtonWithTitle:@"Check for Updates"
                                          color:[ELTheme surfaceHighlightColor]
                                          frame:CGRectMake(16, 74, 256, 36)] retain];
     [_updateBtn addTarget:self action:@selector(onUpdateBtnTapped) forControlEvents:UIControlEventTouchUpInside];
     [_updateCard addSubview:_updateBtn];
+#endif
 
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refreshUI) name:ELAuthStateChangedNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refreshUI) name:ELLibraryUpdatedNotification object:nil];
@@ -358,17 +377,21 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
     }
 }
 
+#if EL_FEATURE_SHAKE_SHUFFLE
 - (void)onShakeToggled {
     [[ELAudioEngine sharedEngine] setShakeToShuffleEnabled:_shakeSwitch.on];
     [[ELAudioEngine sharedEngine] postToast:(_shakeSwitch.on ? @"Shake to Shuffle: On" : @"Shake to Shuffle: Off")];
 }
+#endif
 
+#if EL_FEATURE_LYRICS
 - (void)onLyricsToggled {
     NSUserDefaults *defs = [NSUserDefaults standardUserDefaults];
     [defs setBool:_lyricsSwitch.on forKey:kOnlineLyricsDefaultsKey];
     [defs synchronize];
     [[ELAudioEngine sharedEngine] postToast:(_lyricsSwitch.on ? @"Online Lyrics: On (lrclib.net)" : @"Online Lyrics: Off (cached only)")];
 }
+#endif
 
 - (void)onClearCacheTapped {
     unsigned long long freed = [[ELImageCache sharedCache] clearAllCache];
@@ -416,6 +439,7 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
     [self updateCodeLabelText];
 }
 
+#if EL_FEATURE_OTA_UPDATER
 #pragma mark - GitHub Updates
 
 - (void)onUpdateBtnTapped {
@@ -529,6 +553,7 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
         exit(0);
     }
 }
+#endif
 
 #pragma mark - UI Layout & Account Actions
 
@@ -536,8 +561,12 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
     ELAuthManager *auth = [ELAuthManager sharedManager];
     ELYouTubeClient *yt = [ELYouTubeClient sharedClient];
 
+#if EL_FEATURE_SHAKE_SHUFFLE
     _shakeSwitch.on = [[ELAudioEngine sharedEngine] shakeToShuffleEnabled];
+#endif
+#if EL_FEATURE_LYRICS
     _lyricsSwitch.on = [[NSUserDefaults standardUserDefaults] boolForKey:kOnlineLyricsDefaultsKey];
+#endif
     double cacheMB = (double)[[ELImageCache sharedCache] diskCacheBytes] / (1024.0 * 1024.0);
     _cacheLabel.text = [NSString stringWithFormat:@"Album Art Cache\n%.1f MB on disk", cacheMB];
 
@@ -591,10 +620,14 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
         }
     }
 
-    _prefsCard.frame = CGRectMake(16, nextY, 288, 192);
-    CGFloat updateY = nextY + 204.0f;
-    _updateCard.frame = CGRectMake(16, updateY, 288, 122);
-    _scrollView.contentSize = CGSizeMake(320, updateY + 188.0f);
+    CGFloat prefsH = _prefsCard.frame.size.height;
+    _prefsCard.frame = CGRectMake(16, nextY, 288, prefsH);
+    CGFloat bottomY = nextY + prefsH + 12.0f;
+#if EL_FEATURE_OTA_UPDATER
+    _updateCard.frame = CGRectMake(16, bottomY, 288, 122);
+    bottomY += 122.0f;
+#endif
+    _scrollView.contentSize = CGSizeMake(320, bottomY + 66.0f);
 }
 
 - (void)onPrimaryTapped {

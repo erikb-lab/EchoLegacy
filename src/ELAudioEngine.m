@@ -211,12 +211,7 @@ static BOOL el_stream_on_http_chunk(const uint8_t *bytes, NSUInteger length, lon
         double d = el_fmp4_total_duration(s->fmp4);
         if (d > 0.0) {
             s->durationReported = YES;
-            [s->engine performSelectorOnMainThread:@selector(streamDidUpdateDuration:)
-                                        withObject:[NSDictionary dictionaryWithObjectsAndKeys:
-                                                    [NSNumber numberWithInteger:s->token], @"token",
-                                                    [NSNumber numberWithDouble:d], @"duration",
-                                                    nil]
-                                     waitUntilDone:NO];
+            [s->engine notifyDuration:d forToken:s->token];
         }
     }
     return (!s->stopFlag && !s->seekFlag);
@@ -289,8 +284,9 @@ typedef struct {
     BOOL reachedTarget;
 } el_prenext_dl_ctx_t;
 
-@interface ELAudioEngine (PreNextInternal)
+@interface ELAudioEngine (InternalHelpers)
 - (BOOL)isPreNextGenCurrent:(NSInteger)gen;
+- (void)notifyDuration:(double)duration forToken:(NSInteger)token;
 @end
 
 static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, long long contentLength, void *userData) {
@@ -468,19 +464,35 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
     return ok;
 }
 
+- (void)resetPreNextStateLocked:(BOOL)clearInFlight
+                     clearReady:(BOOL)clearReady
+                 clearAttempted:(BOOL)clearAttempted {
+    if (clearInFlight) {
+        NSInteger oldGen = _preNextGen;
+        _preNextGen++;
+        [_preNextInFlightVideoId release];
+        _preNextInFlightVideoId = nil;
+        unlink([[self preNextPartPathForGen:oldGen] UTF8String]);
+    }
+    if (clearReady) {
+        [_preNextReadyVideoId release];
+        _preNextReadyVideoId = nil;
+        [_preNextStreamInfo release];
+        _preNextStreamInfo = nil;
+        _preNextByteLength = 0;
+        _preNextReadyTime = 0;
+        unlink([[self preNextReadyPath] UTF8String]);
+    }
+    if (clearAttempted) {
+        [_preNextAttemptedVideoId release];
+        _preNextAttemptedVideoId = nil;
+        _preNextAttemptedSessionToken = 0;
+    }
+}
+
 - (void)clearPreNextBuffer {
     pthread_mutex_lock(&g_prenext_lock);
-    NSInteger oldGen = _preNextGen;
-    _preNextGen++;
-    [_preNextInFlightVideoId release]; _preNextInFlightVideoId = nil;
-    [_preNextReadyVideoId release];    _preNextReadyVideoId = nil;
-    [_preNextStreamInfo release];      _preNextStreamInfo = nil;
-    [_preNextAttemptedVideoId release]; _preNextAttemptedVideoId = nil;
-    _preNextAttemptedSessionToken = 0;
-    _preNextByteLength = 0;
-    _preNextReadyTime = 0;
-    unlink([[self preNextPartPathForGen:oldGen] UTF8String]);
-    unlink([[self preNextReadyPath] UTF8String]);
+    [self resetPreNextStateLocked:YES clearReady:YES clearAttempted:YES];
     pthread_mutex_unlock(&g_prenext_lock);
 }
 
@@ -515,17 +527,7 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
     BOOL matchReady = (candId && _preNextReadyVideoId && [_preNextReadyVideoId isEqualToString:candId]);
     BOOL matchInFlight = (candId && _preNextInFlightVideoId && [_preNextInFlightVideoId isEqualToString:candId]);
     if (!matchReady && !matchInFlight) {
-        NSInteger oldGen = _preNextGen;
-        _preNextGen++;
-        [_preNextInFlightVideoId release]; _preNextInFlightVideoId = nil;
-        [_preNextReadyVideoId release];    _preNextReadyVideoId = nil;
-        [_preNextStreamInfo release];      _preNextStreamInfo = nil;
-        [_preNextAttemptedVideoId release]; _preNextAttemptedVideoId = nil;
-        _preNextAttemptedSessionToken = 0;
-        _preNextByteLength = 0;
-        _preNextReadyTime = 0;
-        unlink([[self preNextPartPathForGen:oldGen] UTF8String]);
-        unlink([[self preNextReadyPath] UTF8String]);
+        [self resetPreNextStateLocked:YES clearReady:YES clearAttempted:YES];
     }
     pthread_mutex_unlock(&g_prenext_lock);
 }
@@ -560,13 +562,7 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
             return;
         }
         /* Expired ready buffer: clear attempted state so we immediately re-buffer a fresh copy */
-        [_preNextReadyVideoId release];     _preNextReadyVideoId = nil;
-        [_preNextStreamInfo release];       _preNextStreamInfo = nil;
-        [_preNextAttemptedVideoId release]; _preNextAttemptedVideoId = nil;
-        _preNextAttemptedSessionToken = 0;
-        _preNextByteLength = 0;
-        _preNextReadyTime = 0;
-        unlink([[self preNextReadyPath] UTF8String]);
+        [self resetPreNextStateLocked:NO clearReady:YES clearAttempted:YES];
     }
     if (_preNextInFlightVideoId && [_preNextInFlightVideoId isEqualToString:vid]) {
         /* Already in flight for this videoId */
@@ -580,21 +576,13 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
         return;
     }
 
-    NSInteger oldGen = _preNextGen;
-    _preNextGen++;
+    [self resetPreNextStateLocked:YES clearReady:YES clearAttempted:NO];
     launchGen = _preNextGen;
-    [_preNextInFlightVideoId release];
     _preNextInFlightVideoId = [vid copy];
-    [_preNextReadyVideoId release];    _preNextReadyVideoId = nil;
-    [_preNextStreamInfo release];      _preNextStreamInfo = nil;
-    _preNextByteLength = 0;
-    _preNextReadyTime = 0;
     _preNextAttemptedSessionToken = _sessionToken;
     [_preNextAttemptedVideoId release];
     _preNextAttemptedVideoId = [vid copy];
-    unlink([[self preNextPartPathForGen:oldGen] UTF8String]);
     unlink([[self preNextPartPathForGen:launchGen] UTF8String]);
-    unlink([[self preNextReadyPath] UTF8String]);
     shouldLaunch = YES;
     pthread_mutex_unlock(&g_prenext_lock);
 
@@ -1137,13 +1125,7 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
 
     pthread_mutex_lock(&g_prenext_lock);
     /* Always cancel any unfinished in-flight pre-next worker so it doesn't compete for bandwidth */
-    NSInteger oldGen = _preNextGen;
-    _preNextGen++;
-    if (_preNextInFlightVideoId) {
-        [_preNextInFlightVideoId release];
-        _preNextInFlightVideoId = nil;
-        unlink([[self preNextPartPathForGen:oldGen] UTF8String]);
-    }
+    [self resetPreNextStateLocked:YES clearReady:NO clearAttempted:NO];
     if (_preNextReadyVideoId && [_preNextReadyVideoId isEqualToString:track.videoId] &&
         _preNextStreamInfo && _preNextByteLength > 0 &&
         (now - _preNextReadyTime) >= 0.0 && (now - _preNextReadyTime) < EL_PRENEXT_MAX_AGE_SEC) {
@@ -1154,19 +1136,9 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
             claimedStreamInfo = [[_preNextStreamInfo retain] autorelease];
             claimedPreNextFile = activePath;
             claimedPreNextBytes = _preNextByteLength;
-        } else {
-            unlink([readyPath UTF8String]);
         }
-    } else if (_preNextReadyVideoId) {
-        /* Stale or for a different track */
-        unlink([[self preNextReadyPath] UTF8String]);
     }
-    [_preNextReadyVideoId release];     _preNextReadyVideoId = nil;
-    [_preNextStreamInfo release];       _preNextStreamInfo = nil;
-    [_preNextAttemptedVideoId release]; _preNextAttemptedVideoId = nil;
-    _preNextAttemptedSessionToken = 0;
-    _preNextByteLength = 0;
-    _preNextReadyTime = 0;
+    [self resetPreNextStateLocked:NO clearReady:YES clearAttempted:YES];
     pthread_mutex_unlock(&g_prenext_lock);
 
     /* Stream live over TLS 1.2 (or instant start from prenext_active.fmp4 + seamless continuation) */
@@ -1235,6 +1207,40 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
     }
 }
 
+- (void)notifyDuration:(double)duration forToken:(NSInteger)token {
+    NSDictionary *info = [NSDictionary dictionaryWithObjectsAndKeys:
+                          [NSNumber numberWithInteger:token], @"token",
+                          [NSNumber numberWithDouble:duration], @"duration",
+                          nil];
+    [self performSelectorOnMainThread:@selector(streamDidUpdateDuration:)
+                           withObject:info
+                        waitUntilDone:NO];
+}
+
+- (void)notifyStreamFailed:(NSString *)error forToken:(NSInteger)token {
+    NSDictionary *info = [NSDictionary dictionaryWithObjectsAndKeys:
+                          [NSNumber numberWithInteger:token], @"token",
+                          error ? error : @"Stream failed", @"error",
+                          nil];
+    [self performSelectorOnMainThread:@selector(streamDidFail:)
+                           withObject:info
+                        waitUntilDone:NO];
+}
+
+- (uint64_t)applySeekForSession:(el_stream_session_t *)s {
+    uint64_t newOff = 0;
+    double actualSec = 0.0;
+    if (el_fmp4_find_seek_offset(s->fmp4, s->seekTargetSec, &newOff, &actualSec) != 0) {
+        newOff = 0;
+        actualSec = 0.0;
+    }
+    s->seekBaseSec = actualSec;
+    _streamSeekBaseSec = actualSec;
+    el_fmp4_reset_for_seek(s->fmp4, newOff);
+    el_stream_teardown_aq(s, YES);
+    return newOff;
+}
+
 - (void)streamThreadMain:(NSDictionary *)args {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
     [NSThread setThreadPriority:0.65];
@@ -1257,23 +1263,13 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
     }
     if (!streamInfo) {
         if (preNextFile) unlink([preNextFile UTF8String]);
-        [self performSelectorOnMainThread:@selector(streamDidFail:)
-                               withObject:[NSDictionary dictionaryWithObjectsAndKeys:
-                                           [NSNumber numberWithInteger:myToken], @"token",
-                                           resolveErr ? resolveErr : @"Could not resolve stream", @"error",
-                                           nil]
-                            waitUntilDone:NO];
+        [self notifyStreamFailed:(resolveErr ? resolveErr : @"Could not resolve stream") forToken:myToken];
         [pool release];
         return;
     }
 
     if (streamInfo.durationSeconds > 0) {
-        [self performSelectorOnMainThread:@selector(streamDidUpdateDuration:)
-                               withObject:[NSDictionary dictionaryWithObjectsAndKeys:
-                                           [NSNumber numberWithInteger:myToken], @"token",
-                                           [NSNumber numberWithDouble:streamInfo.durationSeconds], @"duration",
-                                           nil]
-                            waitUntilDone:NO];
+        [self notifyDuration:streamInfo.durationSeconds forToken:myToken];
     }
 
     el_stream_session_t *s = (el_stream_session_t *)calloc(1, sizeof(el_stream_session_t));
@@ -1340,12 +1336,7 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
                         double d = el_fmp4_total_duration(s->fmp4);
                         if (d > 0.0) {
                             s->durationReported = YES;
-                            [self performSelectorOnMainThread:@selector(streamDidUpdateDuration:)
-                                                   withObject:[NSDictionary dictionaryWithObjectsAndKeys:
-                                                               [NSNumber numberWithInteger:myToken], @"token",
-                                                               [NSNumber numberWithDouble:d], @"duration",
-                                                               nil]
-                                                waitUntilDone:NO];
+                            [self notifyDuration:d forToken:myToken];
                         }
                     }
                 }
@@ -1357,21 +1348,7 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
                     break;
                 }
                 if (s->seekFlag) {
-                    double target = s->seekTargetSec;
-                    uint64_t newOff = 0;
-                    double actualSec = 0.0;
-                    if (el_fmp4_find_seek_offset(s->fmp4, target, &newOff, &actualSec) == 0) {
-                        rangeStart = newOff;
-                        s->seekBaseSec = actualSec;
-                        _streamSeekBaseSec = actualSec;
-                        el_fmp4_reset_for_seek(s->fmp4, newOff);
-                    } else {
-                        rangeStart = 0;
-                        s->seekBaseSec = 0.0;
-                        _streamSeekBaseSec = 0.0;
-                        el_fmp4_reset_for_seek(s->fmp4, 0);
-                    }
-                    el_stream_teardown_aq(s, YES);
+                    rangeStart = [self applySeekForSession:s];
                     continue;
                 }
                 if (fileParseOk && fedFromFile > 0) {
@@ -1410,12 +1387,7 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
 
         double fmp4Dur = el_fmp4_total_duration(s->fmp4);
         if (fmp4Dur > 0) {
-            [self performSelectorOnMainThread:@selector(streamDidUpdateDuration:)
-                                   withObject:[NSDictionary dictionaryWithObjectsAndKeys:
-                                               [NSNumber numberWithInteger:myToken], @"token",
-                                               [NSNumber numberWithDouble:fmp4Dur], @"duration",
-                                               nil]
-                                waitUntilDone:NO];
+            [self notifyDuration:fmp4Dur forToken:myToken];
         }
 
         if (s->stopFlag || myToken != _sessionToken) {
@@ -1424,21 +1396,7 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
         }
 
         if (s->seekFlag) {
-            double target = s->seekTargetSec;
-            uint64_t newOff = 0;
-            double actualSec = 0.0;
-            if (el_fmp4_find_seek_offset(s->fmp4, target, &newOff, &actualSec) == 0) {
-                rangeStart = newOff;
-                s->seekBaseSec = actualSec;
-                _streamSeekBaseSec = actualSec;
-                el_fmp4_reset_for_seek(s->fmp4, newOff);
-            } else {
-                rangeStart = 0;
-                s->seekBaseSec = 0.0;
-                _streamSeekBaseSec = 0.0;
-                el_fmp4_reset_for_seek(s->fmp4, 0);
-            }
-            el_stream_teardown_aq(s, YES);
+            rangeStart = [self applySeekForSession:s];
             continue;
         }
 
@@ -1465,12 +1423,8 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
                 }
             }
             el_stream_teardown_aq(s, YES);
-            [self performSelectorOnMainThread:@selector(streamDidFail:)
-                                   withObject:[NSDictionary dictionaryWithObjectsAndKeys:
-                                               [NSNumber numberWithInteger:myToken], @"token",
-                                               httpErr ? httpErr : [NSString stringWithFormat:@"Stream HTTP %ld", (long)status], @"error",
-                                               nil]
-                                waitUntilDone:NO];
+            [self notifyStreamFailed:(httpErr ? httpErr : [NSString stringWithFormat:@"Stream HTTP %ld", (long)status])
+                            forToken:myToken];
             break;
         }
 
@@ -1502,21 +1456,7 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
         }
 
         if (s->seekFlag) {
-            double target = s->seekTargetSec;
-            uint64_t newOff = 0;
-            double actualSec = 0.0;
-            if (el_fmp4_find_seek_offset(s->fmp4, target, &newOff, &actualSec) == 0) {
-                rangeStart = newOff;
-                s->seekBaseSec = actualSec;
-                _streamSeekBaseSec = actualSec;
-                el_fmp4_reset_for_seek(s->fmp4, newOff);
-            } else {
-                rangeStart = 0;
-                s->seekBaseSec = 0.0;
-                _streamSeekBaseSec = 0.0;
-                el_fmp4_reset_for_seek(s->fmp4, 0);
-            }
-            el_stream_teardown_aq(s, YES);
+            rangeStart = [self applySeekForSession:s];
             continue;
         }
 
@@ -1647,14 +1587,7 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
     /* Cancel any in-flight pre-next worker so seek gets full Wi-Fi bandwidth; allow retry once playback settles */
     pthread_mutex_lock(&g_prenext_lock);
     if (_preNextInFlightVideoId) {
-        NSInteger oldGen = _preNextGen;
-        _preNextGen++;
-        [_preNextInFlightVideoId release];
-        _preNextInFlightVideoId = nil;
-        [_preNextAttemptedVideoId release];
-        _preNextAttemptedVideoId = nil;
-        _preNextAttemptedSessionToken = 0;
-        unlink([[self preNextPartPathForGen:oldGen] UTF8String]);
+        [self resetPreNextStateLocked:YES clearReady:NO clearAttempted:YES];
     }
     pthread_mutex_unlock(&g_prenext_lock);
 

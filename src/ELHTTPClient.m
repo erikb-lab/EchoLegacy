@@ -365,12 +365,7 @@ static BOOL el_init_tls_once(NSString **errOut) {
     int ret = mbedtls_x509_crt_parse_file(&g_ca_chain, [pemPath UTF8String]);
     if (ret < 0 || g_ca_chain.raw.len == 0) {
         if (errOut) *errOut = [NSString stringWithFormat:@"Failed loading cacert.pem (%d)", ret];
-        mbedtls_x509_crt_free(&g_ca_chain);
-        mbedtls_ctr_drbg_free(&g_drbg);
-        mbedtls_entropy_free(&g_entropy);
-        mbedtls_ssl_config_free(&g_ssl_conf);
-        pthread_mutex_unlock(&g_tls_init_lock);
-        return NO;
+        goto fail;
     }
 
     const char *pers = "echo_legacy_tls_v3";
@@ -378,12 +373,7 @@ static BOOL el_init_tls_once(NSString **errOut) {
                                 (const unsigned char *)pers, strlen(pers));
     if (ret != 0) {
         if (errOut) *errOut = [NSString stringWithFormat:@"RNG seed failed (%d)", ret];
-        mbedtls_x509_crt_free(&g_ca_chain);
-        mbedtls_ctr_drbg_free(&g_drbg);
-        mbedtls_entropy_free(&g_entropy);
-        mbedtls_ssl_config_free(&g_ssl_conf);
-        pthread_mutex_unlock(&g_tls_init_lock);
-        return NO;
+        goto fail;
     }
 
     ret = mbedtls_ssl_config_defaults(&g_ssl_conf,
@@ -392,12 +382,7 @@ static BOOL el_init_tls_once(NSString **errOut) {
                                       MBEDTLS_SSL_PRESET_DEFAULT);
     if (ret != 0) {
         if (errOut) *errOut = [NSString stringWithFormat:@"TLS config failed (%d)", ret];
-        mbedtls_x509_crt_free(&g_ca_chain);
-        mbedtls_ctr_drbg_free(&g_drbg);
-        mbedtls_entropy_free(&g_entropy);
-        mbedtls_ssl_config_free(&g_ssl_conf);
-        pthread_mutex_unlock(&g_tls_init_lock);
-        return NO;
+        goto fail;
     }
 
     mbedtls_ssl_conf_authmode(&g_ssl_conf, MBEDTLS_SSL_VERIFY_REQUIRED);
@@ -410,6 +395,14 @@ static BOOL el_init_tls_once(NSString **errOut) {
     g_tls_ready = YES;
     pthread_mutex_unlock(&g_tls_init_lock);
     return YES;
+
+fail:
+    mbedtls_x509_crt_free(&g_ca_chain);
+    mbedtls_ctr_drbg_free(&g_drbg);
+    mbedtls_entropy_free(&g_entropy);
+    mbedtls_ssl_config_free(&g_ssl_conf);
+    pthread_mutex_unlock(&g_tls_init_lock);
+    return NO;
 }
 
 static BOOL el_tls_session_apply(mbedtls_ssl_context *ssl, const char *host, const char *port) {
@@ -1370,6 +1363,136 @@ static BOOL el_file_dl_chunk_cb(const uint8_t *bytes, NSUInteger length, long lo
     return YES;
 }
 
+static NSMutableDictionary *el_validate_and_copy_headers(NSDictionary *headers, NSString **outError) {
+    NSMutableDictionary *curHeaders = [NSMutableDictionary dictionary];
+    if (!headers) return curHeaders;
+    for (id keyObj in headers) {
+        if (![keyObj isKindOfClass:[NSString class]]) {
+            if (outError) *outError = @"Invalid HTTP header key";
+            return nil;
+        }
+        id valObj = [headers objectForKey:keyObj];
+        if (![valObj isKindOfClass:[NSString class]]) {
+            if (outError) *outError = @"Invalid HTTP header value";
+            return nil;
+        }
+        NSString *kStr = (NSString *)keyObj;
+        NSString *vStr = (NSString *)valObj;
+        if (el_has_forbidden_header_chars(kStr, YES) ||
+            el_has_forbidden_header_chars(vStr, NO)) {
+            if (outError) *outError = @"Forbidden control characters in HTTP header";
+            return nil;
+        }
+        [curHeaders setObject:vStr forKey:kStr];
+    }
+    return curHeaders;
+}
+
+static NSData *el_build_http_request_data(NSString *method,
+                                          NSString *pq,
+                                          NSString *host,
+                                          NSDictionary *curHeaders,
+                                          NSData *body) {
+    NSMutableString *req = [NSMutableString stringWithFormat:@"%@ %@ HTTP/1.1\r\n", method, pq];
+    [req appendFormat:@"Host: %@\r\n", host];
+    [req appendString:@"Connection: keep-alive\r\n"];
+
+    BOOL hasUA = NO;
+    BOOL hasCL = NO;
+    for (NSString *k in curHeaders) {
+        NSString *lk = [k lowercaseString];
+        if ([lk isEqualToString:@"host"] || [lk isEqualToString:@"connection"]) continue;
+        if ([lk isEqualToString:@"user-agent"]) hasUA = YES;
+        if ([lk isEqualToString:@"content-length"]) hasCL = YES;
+        [req appendFormat:@"%@: %@\r\n", k, [curHeaders objectForKey:k]];
+    }
+    if (!hasUA) {
+        [req appendString:@"User-Agent: Mozilla/5.0 (iPhone; U; CPU iPhone OS 4_1 like Mac OS X)\r\n"];
+    }
+    if (body && [body length] > 0 && !hasCL) {
+        [req appendFormat:@"Content-Length: %lu\r\n", (unsigned long)[body length]];
+    }
+    [req appendString:@"\r\n"];
+    return [req dataUsingEncoding:NSUTF8StringEncoding];
+}
+
+static void el_strip_headers_for_redirect(NSMutableDictionary *curHeaders, BOOL stripSensitive, BOOL stripBody) {
+    if (!stripSensitive && !stripBody) return;
+    NSMutableArray *toRemove = [NSMutableArray array];
+    for (NSString *k in curHeaders) {
+        NSString *lk = [k lowercaseString];
+        if (stripSensitive &&
+            ([lk isEqualToString:@"authorization"] ||
+             [lk isEqualToString:@"cookie"] ||
+             [lk isEqualToString:@"x-goog-visitor-id"] ||
+             [lk isEqualToString:@"x-goog-request-time"] ||
+             [lk isEqualToString:@"origin"] ||
+             [lk isEqualToString:@"referer"])) {
+            [toRemove addObject:k];
+        } else if (stripBody &&
+                   ([lk isEqualToString:@"content-type"] || [lk isEqualToString:@"content-length"])) {
+            [toRemove addObject:k];
+        }
+    }
+    for (NSString *k in toRemove) [curHeaders removeObjectForKey:k];
+}
+
+static BOOL el_drain_content_length_body(el_conn_t *conn,
+                                         NSData *leftover,
+                                         long long contentLen,
+                                         ELHTTPStreamCallback callback,
+                                         void *userData,
+                                         BOOL *outAborted,
+                                         BOOL *outLeftoverOverflow,
+                                         NSString **outErrMsg) {
+    BOOL aborted = NO;
+    BOOL transferError = NO;
+    BOOL leftoverOverflow = NO;
+    NSString *errMsg = nil;
+    long long received = 0;
+    uint8_t rbuf[16384];
+
+    if ([leftover length] > 0) {
+        NSUInteger take = [leftover length];
+        if (contentLen >= 0 && (long long)take > contentLen) {
+            take = (NSUInteger)contentLen;
+            leftoverOverflow = YES;
+        }
+        if (callback && !callback((const uint8_t *)[leftover bytes], take, contentLen, userData)) {
+            aborted = YES;
+        }
+        received += (long long)take;
+    }
+    while (!aborted && (contentLen < 0 || received < contentLen)) {
+        size_t want = sizeof(rbuf);
+        if (contentLen >= 0 && (contentLen - received) < (long long)want) {
+            want = (size_t)(contentLen - received);
+        }
+        int n = el_conn_read(conn, rbuf, want);
+        if (n < 0) {
+            transferError = YES;
+            errMsg = @"Socket read error during HTTP response";
+            break;
+        }
+        if (n == 0) break;
+        if (callback && !callback(rbuf, (NSUInteger)n, contentLen, userData)) {
+            aborted = YES;
+            break;
+        }
+        received += (long long)n;
+    }
+    if (!aborted && !transferError && contentLen >= 0 && received != contentLen) {
+        transferError = YES;
+        errMsg = [NSString stringWithFormat:@"Truncated HTTP response (%lld of %lld bytes)",
+                  received, contentLen];
+    }
+
+    if (outAborted) *outAborted = aborted;
+    if (outLeftoverOverflow) *outLeftoverOverflow = leftoverOverflow;
+    if (outErrMsg) *outErrMsg = errMsg;
+    return !transferError;
+}
+
 @implementation ELHTTPClient
 
 + (ELHTTPClient *)sharedClient {
@@ -1439,28 +1562,8 @@ static BOOL el_file_dl_chunk_cb(const uint8_t *bytes, NSUInteger length, long lo
     NSString *currentURL = urlString;
     NSString *currentMethod = method;
     NSData *currentBody = body;
-    NSMutableDictionary *curHeaders = [NSMutableDictionary dictionary];
-    if (headers) {
-        for (id keyObj in headers) {
-            if (![keyObj isKindOfClass:[NSString class]]) {
-                if (outError) *outError = @"Invalid HTTP header key";
-                return NO;
-            }
-            id valObj = [headers objectForKey:keyObj];
-            if (![valObj isKindOfClass:[NSString class]]) {
-                if (outError) *outError = @"Invalid HTTP header value";
-                return NO;
-            }
-            NSString *kStr = (NSString *)keyObj;
-            NSString *vStr = (NSString *)valObj;
-            if (el_has_forbidden_header_chars(kStr, YES) ||
-                el_has_forbidden_header_chars(vStr, NO)) {
-                if (outError) *outError = @"Forbidden control characters in HTTP header";
-                return NO;
-            }
-            [curHeaders setObject:vStr forKey:kStr];
-        }
-    }
+    NSMutableDictionary *curHeaders = el_validate_and_copy_headers(headers, outError);
+    if (!curHeaders) return NO;
 
     ELHostCategory initialCategory = ELHostCategoryAnyAllowlisted;
 
@@ -1478,28 +1581,7 @@ static BOOL el_file_dl_chunk_cb(const uint8_t *bytes, NSUInteger length, long lo
             initialCategory = el_category_for_host(host);
         }
 
-        NSMutableString *req = [NSMutableString stringWithFormat:@"%@ %@ HTTP/1.1\r\n", currentMethod, pq];
-        [req appendFormat:@"Host: %@\r\n", host];
-        [req appendString:@"Connection: keep-alive\r\n"];
-
-        BOOL hasUA = NO;
-        BOOL hasCL = NO;
-        for (NSString *k in curHeaders) {
-            NSString *lk = [k lowercaseString];
-            if ([lk isEqualToString:@"host"] || [lk isEqualToString:@"connection"]) continue;
-            if ([lk isEqualToString:@"user-agent"]) hasUA = YES;
-            if ([lk isEqualToString:@"content-length"]) hasCL = YES;
-            [req appendFormat:@"%@: %@\r\n", k, [curHeaders objectForKey:k]];
-        }
-        if (!hasUA) {
-            [req appendString:@"User-Agent: Mozilla/5.0 (iPhone; U; CPU iPhone OS 4_1 like Mac OS X)\r\n"];
-        }
-        if (currentBody && [currentBody length] > 0 && !hasCL) {
-            [req appendFormat:@"Content-Length: %lu\r\n", (unsigned long)[currentBody length]];
-        }
-        [req appendString:@"\r\n"];
-
-        NSData *reqHdrData = [req dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *reqHdrData = el_build_http_request_data(currentMethod, pq, host, curHeaders, currentBody);
         const char *hostCStr = [host UTF8String];
         const char *portCStr = [port UTF8String];
 
@@ -1584,36 +1666,14 @@ static BOOL el_file_dl_chunk_cb(const uint8_t *bytes, NSUInteger length, long lo
             }
 
             BOOL crossOrigin = (![nextHost isEqualToString:host] || ![nextPort isEqualToString:port]);
-            if (crossOrigin) {
-                /* Strip sensitive headers across hosts */
-                NSMutableArray *toRemove = [NSMutableArray array];
-                for (NSString *k in curHeaders) {
-                    NSString *lk = [k lowercaseString];
-                    if ([lk isEqualToString:@"authorization"] ||
-                        [lk isEqualToString:@"cookie"] ||
-                        [lk isEqualToString:@"x-goog-visitor-id"] ||
-                        [lk isEqualToString:@"x-goog-request-time"] ||
-                        [lk isEqualToString:@"origin"] ||
-                        [lk isEqualToString:@"referer"]) {
-                        [toRemove addObject:k];
-                    }
-                }
-                for (NSString *k in toRemove) [curHeaders removeObjectForKey:k];
-            }
+            BOOL downgradeToGet = (status == 301 || status == 302 || status == 303 || crossOrigin);
+            el_strip_headers_for_redirect(curHeaders, crossOrigin, downgradeToGet);
 
-            if (status == 301 || status == 302 || status == 303 || crossOrigin) {
+            if (downgradeToGet) {
                 if ([currentMethod isEqualToString:@"POST"]) {
                     currentMethod = @"GET";
                 }
                 currentBody = nil;
-                NSMutableArray *bodyHdrs = [NSMutableArray array];
-                for (NSString *k in curHeaders) {
-                    NSString *lk = [k lowercaseString];
-                    if ([lk isEqualToString:@"content-type"] || [lk isEqualToString:@"content-length"]) {
-                        [bodyHdrs addObject:k];
-                    }
-                }
-                for (NSString *k in bodyHdrs) [curHeaders removeObjectForKey:k];
             }
 
             currentURL = loc;
@@ -1784,44 +1844,12 @@ static BOOL el_file_dl_chunk_cb(const uint8_t *bytes, NSUInteger length, long lo
                 canReuse = YES;
             }
         } else {
-            long long received = 0;
             BOOL leftoverOverflow = NO;
-            if ([leftover length] > 0) {
-                NSUInteger take = [leftover length];
-                if (contentLen >= 0 && (long long)take > contentLen) {
-                    take = (NSUInteger)contentLen;
-                    leftoverOverflow = YES;
-                }
-                if (callback && !callback((const uint8_t *)[leftover bytes], take, contentLen, userData)) {
-                    aborted = YES;
-                }
-                received += (long long)take;
-            }
-            while (!aborted && (contentLen < 0 || received < contentLen)) {
-                size_t want = sizeof(rbuf);
-                if (contentLen >= 0 && (contentLen - received) < (long long)want) {
-                    want = (size_t)(contentLen - received);
-                }
-                int n = el_conn_read(conn, rbuf, want);
-                if (n < 0) {
-                    transferError = YES;
-                    transferErrMsg = @"Socket read error during HTTP response";
-                    break;
-                }
-                if (n == 0) break;
-                if (callback && !callback(rbuf, (NSUInteger)n, contentLen, userData)) {
-                    aborted = YES;
-                    break;
-                }
-                received += (long long)n;
-            }
-            /* Flaw #11: Verify exact Content-Length match on connection close */
-            if (!aborted && !transferError && contentLen >= 0 && received != contentLen) {
+            if (!el_drain_content_length_body(conn, leftover, contentLen, callback, userData,
+                                              &aborted, &leftoverOverflow, &transferErrMsg)) {
                 transferError = YES;
-                transferErrMsg = [NSString stringWithFormat:@"Truncated HTTP response (%lld of %lld bytes)",
-                                  received, contentLen];
             }
-            if (!aborted && !transferError && !leftoverOverflow && contentLen >= 0 && received == contentLen) {
+            if (!aborted && !transferError && !leftoverOverflow && contentLen >= 0) {
                 canReuse = YES;
             }
         }
@@ -1984,37 +2012,26 @@ static BOOL el_file_dl_chunk_cb(const uint8_t *bytes, NSUInteger length, long lo
     if (fflush(fp) != 0) fctx.writeError = YES;
     fclose(fp);
 
+    NSString *failMsg = nil;
     if (fctx.exceeded) {
-        unlink([partPath UTF8String]);
-        if (outError) *outError = @"Download exceeds maximum allowed file size";
-        return NO;
-    }
-    if (fctx.writeError) {
-        unlink([partPath UTF8String]);
-        if (outError) *outError = @"Disk write error while downloading file";
-        return NO;
-    }
-    if (!ok) {
-        unlink([partPath UTF8String]);
-        if (outError) *outError = err ? err : @"Download failed";
-        return NO;
-    }
-    if (status < 200 || status >= 300) {
-        unlink([partPath UTF8String]);
-        if (outError) *outError = [NSString stringWithFormat:@"Download HTTP %ld", (long)status];
-        return NO;
-    }
-    if (fctx.writtenBytes == 0 ||
-        (contentLen >= 0 && fctx.writtenBytes != (uint64_t)contentLen) ||
-        (expectedBytes > 0 && fctx.writtenBytes != (uint64_t)expectedBytes)) {
-        unlink([partPath UTF8String]);
-        if (outError) *outError = @"Downloaded file size mismatch (truncated download)";
-        return NO;
+        failMsg = @"Download exceeds maximum allowed file size";
+    } else if (fctx.writeError) {
+        failMsg = @"Disk write error while downloading file";
+    } else if (!ok) {
+        failMsg = err ? err : @"Download failed";
+    } else if (status < 200 || status >= 300) {
+        failMsg = [NSString stringWithFormat:@"Download HTTP %ld", (long)status];
+    } else if (fctx.writtenBytes == 0 ||
+               (contentLen >= 0 && fctx.writtenBytes != (uint64_t)contentLen) ||
+               (expectedBytes > 0 && fctx.writtenBytes != (uint64_t)expectedBytes)) {
+        failMsg = @"Downloaded file size mismatch (truncated download)";
+    } else if (rename([partPath UTF8String], [destPath UTF8String]) != 0) {
+        failMsg = @"Failed moving downloaded file into place";
     }
 
-    if (rename([partPath UTF8String], [destPath UTF8String]) != 0) {
+    if (failMsg) {
         unlink([partPath UTF8String]);
-        if (outError) *outError = @"Failed moving downloaded file into place";
+        if (outError) *outError = failMsg;
         return NO;
     }
     return YES;
@@ -2087,28 +2104,8 @@ static BOOL el_range_chunk_cb(const uint8_t *bytes, NSUInteger length, long long
         return NO;
     }
 
-    NSMutableDictionary *curHeaders = [NSMutableDictionary dictionary];
-    if (headers) {
-        for (id keyObj in headers) {
-            if (![keyObj isKindOfClass:[NSString class]]) {
-                if (outError) *outError = @"Invalid HTTP header key";
-                return NO;
-            }
-            id valObj = [headers objectForKey:keyObj];
-            if (![valObj isKindOfClass:[NSString class]]) {
-                if (outError) *outError = @"Invalid HTTP header value";
-                return NO;
-            }
-            NSString *kStr = (NSString *)keyObj;
-            NSString *vStr = (NSString *)valObj;
-            if (el_has_forbidden_header_chars(kStr, YES) ||
-                el_has_forbidden_header_chars(vStr, NO)) {
-                if (outError) *outError = @"Forbidden control characters in HTTP header";
-                return NO;
-            }
-            [curHeaders setObject:vStr forKey:kStr];
-        }
-    }
+    NSMutableDictionary *curHeaders = el_validate_and_copy_headers(headers, outError);
+    if (!curHeaders) return NO;
 
     ELHostCategory initialCategory = ELHostCategoryAnyAllowlisted;
     NSString *currentURL = *ioURL;
@@ -2138,22 +2135,7 @@ static BOOL el_range_chunk_cb(const uint8_t *bytes, NSUInteger length, long long
             *ioConnOpen = NO;
         }
 
-        NSMutableString *req = [NSMutableString stringWithFormat:@"GET %@ HTTP/1.1\r\n", pq];
-        [req appendFormat:@"Host: %@\r\n", host];
-        [req appendString:@"Connection: keep-alive\r\n"];
-
-        BOOL hasUA = NO;
-        for (NSString *k in curHeaders) {
-            NSString *lk = [k lowercaseString];
-            if ([lk isEqualToString:@"host"] || [lk isEqualToString:@"connection"]) continue;
-            if ([lk isEqualToString:@"user-agent"]) hasUA = YES;
-            [req appendFormat:@"%@: %@\r\n", k, [curHeaders objectForKey:k]];
-        }
-        if (!hasUA) {
-            [req appendString:@"User-Agent: Mozilla/5.0 (iPhone; U; CPU iPhone OS 4_1 like Mac OS X)\r\n"];
-        }
-        [req appendString:@"\r\n"];
-        NSData *reqHdrData = [req dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *reqHdrData = el_build_http_request_data(@"GET", pq, host, curHeaders, nil);
 
         NSInteger status = 0;
         NSMutableDictionary *respHeaders = nil;
@@ -2214,21 +2196,8 @@ static BOOL el_range_chunk_cb(const uint8_t *bytes, NSUInteger length, long long
                 if (outError) *outError = @"Blocked insecure or cross-category HTTP redirect";
                 return NO;
             }
-            if (![nextHost isEqualToString:host] || ![nextPort isEqualToString:port]) {
-                NSMutableArray *toRemove = [NSMutableArray array];
-                for (NSString *k in curHeaders) {
-                    NSString *lk = [k lowercaseString];
-                    if ([lk isEqualToString:@"authorization"] ||
-                        [lk isEqualToString:@"cookie"] ||
-                        [lk isEqualToString:@"x-goog-visitor-id"] ||
-                        [lk isEqualToString:@"x-goog-request-time"] ||
-                        [lk isEqualToString:@"origin"] ||
-                        [lk isEqualToString:@"referer"]) {
-                        [toRemove addObject:k];
-                    }
-                }
-                for (NSString *k in toRemove) [curHeaders removeObjectForKey:k];
-            }
+            BOOL crossOrigin = (![nextHost isEqualToString:host] || ![nextPort isEqualToString:port]);
+            el_strip_headers_for_redirect(curHeaders, crossOrigin, NO);
             currentURL = loc;
             [*ioURL release];
             *ioURL = [loc copy];
@@ -2264,40 +2233,11 @@ static BOOL el_range_chunk_cb(const uint8_t *bytes, NSUInteger length, long long
         BOOL aborted = NO;
         BOOL transferError = NO;
         NSString *transferErrMsg = nil;
-        uint8_t rbuf[16384];
 
         if (!isChunked) {
-            long long received = 0;
-            if ([leftover length] > 0) {
-                NSUInteger take = [leftover length];
-                if (contentLen >= 0 && (long long)take > contentLen) take = (NSUInteger)contentLen;
-                if (callback && !callback((const uint8_t *)[leftover bytes], take, contentLen, userData)) {
-                    aborted = YES;
-                }
-                received += (long long)take;
-            }
-            while (!aborted && (contentLen < 0 || received < contentLen)) {
-                size_t want = sizeof(rbuf);
-                if (contentLen >= 0 && (contentLen - received) < (long long)want) {
-                    want = (size_t)(contentLen - received);
-                }
-                int n = el_conn_read(ioConn, rbuf, want);
-                if (n < 0) {
-                    transferError = YES;
-                    transferErrMsg = @"Socket read error during HTTP range response";
-                    break;
-                }
-                if (n == 0) break;
-                if (callback && !callback(rbuf, (NSUInteger)n, contentLen, userData)) {
-                    aborted = YES;
-                    break;
-                }
-                received += (long long)n;
-            }
-            if (!aborted && !transferError && contentLen >= 0 && received != contentLen) {
+            if (!el_drain_content_length_body(ioConn, leftover, contentLen, callback, userData,
+                                              &aborted, NULL, &transferErrMsg)) {
                 transferError = YES;
-                transferErrMsg = [NSString stringWithFormat:@"Truncated HTTP range response (%lld of %lld bytes)",
-                                  received, contentLen];
             }
         } else {
             /* Rare chunked range fallback: close connection and delegate or fail if truncated */
@@ -2367,14 +2307,15 @@ static BOOL el_range_chunk_cb(const uint8_t *bytes, NSUInteger length, long long
     NSString *kaPort = nil;
     NSString *activeURL = [urlString copy];
 
+    BOOL result = YES;
+    BOOL aborted = NO;
+    NSString *retainedErr = nil;
+
     while (knownTotal <= 0 || (long long)pos < knownTotal) {
         if ((long long)pos >= EL_HTTP_MAX_RANGE_STREAM_BYTES) {
-            if (kaOpen) el_conn_close(&kaConn);
-            [kaHost release];
-            [kaPort release];
-            [activeURL release];
-            if (outError) *outError = @"Stream exceeded 50 MB limit";
-            return NO;
+            retainedErr = [@"Stream exceeded 50 MB limit" retain];
+            result = NO;
+            break;
         }
         NSAutoreleasePool *chunkPool = [[NSAutoreleasePool alloc] init];
         /* Use fast initialChunkSize (e.g. 512 KiB) at byte 0 for instant time-to-first-audio,
@@ -2421,55 +2362,38 @@ static BOOL el_range_chunk_cb(const uint8_t *bytes, NSUInteger length, long long
         if (outStatus) *outStatus = lastStatus;
 
         if (wrap.exceededCap) {
+            retainedErr = [@"Stream exceeded 50 MB limit" retain];
+            result = NO;
             [chunkPool release];
-            if (kaOpen) el_conn_close(&kaConn);
-            [kaHost release];
-            [kaPort release];
-            [activeURL release];
-            if (outError) *outError = @"Stream exceeded 50 MB limit";
-            return NO;
+            break;
         }
         if (wrap.aborted) {
+            aborted = YES;
             [chunkPool release];
-            if (kaOpen) el_conn_close(&kaConn);
-            [kaHost release];
-            [kaPort release];
-            [activeURL release];
-            return YES;
+            break;
         }
         if (!ok) {
-            NSString *retainedErr = [err retain];
+            retainedErr = [err retain];
+            result = NO;
             [chunkPool release];
-            if (kaOpen) el_conn_close(&kaConn);
-            [kaHost release];
-            [kaPort release];
-            [activeURL release];
-            if (outError) *outError = [retainedErr autorelease];
-            else [retainedErr release];
-            return NO;
+            break;
         }
         if (status == 416) {
             /* Reached EOF: valid only if we already received the expected total */
             [chunkPool release];
-            if (kaOpen) el_conn_close(&kaConn);
-            [kaHost release];
-            [kaPort release];
-            [activeURL release];
-            if (knownTotal > 0 && (long long)pos < knownTotal) {
-                if (outError) *outError = @"Truncated range stream (HTTP 416 before expected end)";
-                return NO;
+            if (!aborted && knownTotal > 0 && (long long)pos < knownTotal) {
+                retainedErr = [@"Truncated range stream (HTTP 416 before expected end)" retain];
+                result = NO;
+            } else if (outStatus) {
+                *outStatus = 206;
             }
-            if (outStatus) *outStatus = 206;
-            return YES;
+            break;
         }
         if (status != 200 && status != 206) {
+            retainedErr = [[NSString stringWithFormat:@"HTTP %ld", (long)status] retain];
+            result = NO;
             [chunkPool release];
-            if (kaOpen) el_conn_close(&kaConn);
-            [kaHost release];
-            [kaPort release];
-            [activeURL release];
-            if (outError) *outError = [NSString stringWithFormat:@"HTTP %ld", (long)status];
-            return NO;
+            break;
         }
 
         /* Extract exact total length from Content-Range: bytes A-B/TOTAL if unknown */
@@ -2480,25 +2404,19 @@ static BOOL el_range_chunk_cb(const uint8_t *bytes, NSUInteger length, long long
                 if (slash.location != NSNotFound) {
                     long long tot = [[cr substringFromIndex:slash.location + 1] longLongValue];
                     if (tot > EL_HTTP_MAX_RANGE_STREAM_BYTES) {
+                        retainedErr = [@"Stream Content-Range total exceeds 50 MB limit" retain];
+                        result = NO;
                         [chunkPool release];
-                        if (kaOpen) el_conn_close(&kaConn);
-                        [kaHost release];
-                        [kaPort release];
-                        [activeURL release];
-                        if (outError) *outError = @"Stream Content-Range total exceeds 50 MB limit";
-                        return NO;
+                        break;
                     }
                     if (tot > 0) knownTotal = tot;
                 }
             } else if (status == 200 && cl > 0) {
                 if ((long long)pos + cl > EL_HTTP_MAX_RANGE_STREAM_BYTES) {
+                    retainedErr = [@"Stream Content-Length exceeds 50 MB limit" retain];
+                    result = NO;
                     [chunkPool release];
-                    if (kaOpen) el_conn_close(&kaConn);
-                    [kaHost release];
-                    [kaPort release];
-                    [activeURL release];
-                    if (outError) *outError = @"Stream Content-Length exceeds 50 MB limit";
-                    return NO;
+                    break;
                 }
                 knownTotal = (long long)pos + cl;
             }
@@ -2515,7 +2433,14 @@ static BOOL el_range_chunk_cb(const uint8_t *bytes, NSUInteger length, long long
     [kaPort release];
     [activeURL release];
 
-    if (knownTotal > 0 && (long long)pos < knownTotal) {
+    if (!result) {
+        if (outError) *outError = [retainedErr autorelease];
+        else [retainedErr release];
+        return NO;
+    }
+    [retainedErr release];
+
+    if (!aborted && knownTotal > 0 && (long long)pos < knownTotal) {
         if (outError) *outError = [NSString stringWithFormat:@"Truncated range stream (%llu of %lld bytes)",
                                    (unsigned long long)pos, knownTotal];
         return NO;

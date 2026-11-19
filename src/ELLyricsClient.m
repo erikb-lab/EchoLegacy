@@ -287,32 +287,27 @@ static BOOL el_lrclib_item_matches_track(NSDictionary *item,
     return [_lyricsDir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.txt", videoId]];
 }
 
+static NSString *el_read_capped_utf8_file(NSFileManager *fm, NSString *path, NSUInteger maxBytes) {
+    if (!path || ![fm fileExistsAtPath:path]) return nil;
+    NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
+    unsigned long long fsz = [[attrs objectForKey:NSFileSize] unsignedLongLongValue];
+    if (fsz == 0 || fsz > (unsigned long long)maxBytes) return nil;
+    NSString *raw = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+    return ([raw length] > 0 && [raw length] <= maxBytes) ? raw : nil;
+}
+
 - (NSArray *)cachedLyricsForVideoId:(NSString *)videoId {
     if (!el_is_valid_video_id(videoId)) return nil;
     NSFileManager *fm = [[[NSFileManager alloc] init] autorelease];
-    NSString *lrcPath = [self lyricsFilePathForVideoId:videoId];
-    if (lrcPath && [fm fileExistsAtPath:lrcPath]) {
-        NSDictionary *attrs = [fm attributesOfItemAtPath:lrcPath error:nil];
-        unsigned long long fsz = [[attrs objectForKey:NSFileSize] unsignedLongLongValue];
-        if (fsz > 0 && fsz <= EL_MAX_LYRICS_BYTES) {
-            NSString *raw = [NSString stringWithContentsOfFile:lrcPath encoding:NSUTF8StringEncoding error:nil];
-            if ([raw length] > 0 && [raw length] <= EL_MAX_LYRICS_BYTES) {
-                NSArray *parsed = el_parse_lrc_string(raw);
-                if ([parsed count] > 0) return parsed;
-            }
-        }
+    NSString *lrcRaw = el_read_capped_utf8_file(fm, [self lyricsFilePathForVideoId:videoId], EL_MAX_LYRICS_BYTES);
+    if (lrcRaw) {
+        NSArray *parsed = el_parse_lrc_string(lrcRaw);
+        if ([parsed count] > 0) return parsed;
     }
-    NSString *txtPath = [self plainLyricsFilePathForVideoId:videoId];
-    if (txtPath && [fm fileExistsAtPath:txtPath]) {
-        NSDictionary *attrs = [fm attributesOfItemAtPath:txtPath error:nil];
-        unsigned long long fsz = [[attrs objectForKey:NSFileSize] unsignedLongLongValue];
-        if (fsz > 0 && fsz <= EL_MAX_LYRICS_BYTES) {
-            NSString *raw = [NSString stringWithContentsOfFile:txtPath encoding:NSUTF8StringEncoding error:nil];
-            if ([raw length] > 0 && [raw length] <= EL_MAX_LYRICS_BYTES) {
-                NSArray *parsed = el_parse_plain_lyrics(raw);
-                if ([parsed count] > 0) return parsed;
-            }
-        }
+    NSString *txtRaw = el_read_capped_utf8_file(fm, [self plainLyricsFilePathForVideoId:videoId], EL_MAX_LYRICS_BYTES);
+    if (txtRaw) {
+        NSArray *parsed = el_parse_plain_lyrics(txtRaw);
+        if ([parsed count] > 0) return parsed;
     }
     return nil;
 }
@@ -418,9 +413,9 @@ static BOOL el_lrclib_item_matches_track(NSDictionary *item,
     if (searchResp.statusCode == 200 && searchResp.body && [searchResp.body length] <= EL_MAX_LYRICS_BYTES) {
         id json = [ELJSON objectWithData:searchResp.body];
         if ([json isKindOfClass:[NSArray class]]) {
-            NSArray *arr = (NSArray *)json;
-            /* Prefer a validated entry with syncedLyrics */
-            for (id item in arr) {
+            /* Prefer a validated entry with syncedLyrics; remember first plain fallback */
+            NSDictionary *plainFallback = nil;
+            for (id item in (NSArray *)json) {
                 if (![item isKindOfClass:[NSDictionary class]]) continue;
                 if (!el_lrclib_item_matches_track((NSDictionary *)item, title, artist, track.durationSeconds)) continue;
                 NSString *synced = [ELJSON string:item forKey:@"syncedLyrics"];
@@ -428,12 +423,10 @@ static BOOL el_lrclib_item_matches_track(NSDictionary *item,
                     NSArray *lines = [self processLRCLibItem:item videoId:track.videoId];
                     if ([lines count] > 0) return lines;
                 }
+                if (!plainFallback) plainFallback = (NSDictionary *)item;
             }
-            /* Fallback to first validated entry with plainLyrics */
-            for (id item in arr) {
-                if (![item isKindOfClass:[NSDictionary class]]) continue;
-                if (!el_lrclib_item_matches_track((NSDictionary *)item, title, artist, track.durationSeconds)) continue;
-                NSArray *lines = [self processLRCLibItem:item videoId:track.videoId];
+            if (plainFallback) {
+                NSArray *lines = [self processLRCLibItem:plainFallback videoId:track.videoId];
                 if ([lines count] > 0) return lines;
             }
         }

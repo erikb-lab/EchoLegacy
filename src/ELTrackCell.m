@@ -1,5 +1,7 @@
 #import "ELTrackCell.h"
+#if EL_FEATURE_DOWNLOADS
 #import "ELDownloadManager.h"
+#endif
 #import "ELImageCache.h"
 #import "ELTheme.h"
 
@@ -34,7 +36,12 @@
         [self.contentView addSubview:_artView];
 
         /* Opaque labels matching card surface eliminate MBX Lite alpha-blending overdraw */
-        _titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(74.0f, 12.0f, 194.0f, 19.0f)];
+#if EL_FEATURE_DOWNLOADS
+        CGFloat labelW = 194.0f;
+#else
+        CGFloat labelW = 230.0f;
+#endif
+        _titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(74.0f, 12.0f, labelW, 19.0f)];
         _titleLabel.backgroundColor = cardBg;
         _titleLabel.opaque = YES;
         _titleLabel.font = [UIFont boldSystemFontOfSize:14.0f];
@@ -42,7 +49,7 @@
         _titleLabel.lineBreakMode = UILineBreakModeTailTruncation;
         [self.contentView addSubview:_titleLabel];
 
-        _subtitleLabel = [[UILabel alloc] initWithFrame:CGRectMake(74.0f, 32.0f, 194.0f, 17.0f)];
+        _subtitleLabel = [[UILabel alloc] initWithFrame:CGRectMake(74.0f, 32.0f, labelW, 17.0f)];
         _subtitleLabel.backgroundColor = cardBg;
         _subtitleLabel.opaque = YES;
         _subtitleLabel.font = [UIFont systemFontOfSize:12.0f];
@@ -50,6 +57,7 @@
         _subtitleLabel.lineBreakMode = UILineBreakModeTailTruncation;
         [self.contentView addSubview:_subtitleLabel];
 
+#if EL_FEATURE_DOWNLOADS
         _downloadBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
         _downloadBtn.frame = CGRectMake(270.0f, 12.0f, 34.0f, 38.0f);
         _downloadBtn.backgroundColor = cardBg;
@@ -57,6 +65,7 @@
         _downloadBtn.titleLabel.font = [UIFont boldSystemFontOfSize:10.0f];
         [_downloadBtn addTarget:self action:@selector(onDownloadTapped) forControlEvents:UIControlEventTouchUpInside];
         [self.contentView addSubview:_downloadBtn];
+#endif
 
         _isActiveBg = NO;
         _bgInitialized = YES;
@@ -69,7 +78,9 @@
     [_artView release];
     [_titleLabel release];
     [_subtitleLabel release];
+#if EL_FEATURE_DOWNLOADS
     [_downloadBtn release];
+#endif
     [_currentVideoId release];
     [_currentThumbURL release];
     [_track release];
@@ -86,7 +97,9 @@
     _cardBgView.image = [ELTheme stretchableCardImageWithColor:cardBg];
     _titleLabel.backgroundColor = cardBg;
     _subtitleLabel.backgroundColor = cardBg;
+#if EL_FEATURE_DOWNLOADS
     _downloadBtn.backgroundColor = cardBg;
+#endif
 }
 
 - (void)setHighlighted:(BOOL)highlighted animated:(BOOL)animated {
@@ -162,6 +175,7 @@
 }
 
 - (void)refreshDownloadState {
+#if EL_FEATURE_DOWNLOADS
     if (!_track) return;
     ELDownloadManager *dm = [ELDownloadManager sharedManager];
     if ([dm isDownloaded:_track.videoId]) {
@@ -180,8 +194,10 @@
         [_downloadBtn setTitle:nil forState:UIControlStateNormal];
         [_downloadBtn setImage:[ELTheme iconDownloadSize:20.0f color:[ELTheme textSecondaryColor]] forState:UIControlStateNormal];
     }
+#endif
 }
 
+#if EL_FEATURE_DOWNLOADS
 - (void)onDownloadTapped {
     if (!_track) return;
     ELDownloadManager *dm = [ELDownloadManager sharedManager];
@@ -195,5 +211,6 @@
     }
     [self refreshDownloadState];
 }
+#endif
 
 @end
