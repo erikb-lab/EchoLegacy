@@ -2,7 +2,7 @@
 
 @class ELUpdateInfo;
 
-@interface ELAccountVC : UIViewController <UIAlertViewDelegate> {
+@interface ELAccountVC : UIViewController <UIAlertViewDelegate, UITextFieldDelegate> {
     UIScrollView *_scrollView;
     UIView *_statusDot;
     UILabel *_accountTitleLabel;
@@ -11,16 +11,28 @@
     UIButton *_primaryBtn;
     UIButton *_secondaryBtn;
 
+    /* User-supplied OAuth Client ID / Secret configuration card */
+    UIView *_oauthCard;
+    UITextField *_clientIdField;
+    UITextField *_clientSecretField;
+    UIButton *_saveOAuthBtn;
+    BOOL _showingOAuthConfig;
+
     /* Live Device OAuth code card */
     UIView *_codeCard;
     UILabel *_codeHintLabel;
     UILabel *_codeValueLabel;
+    UIButton *_codeRevealBtn;
     UILabel *_codePollLabel;
     UIActivityIndicatorView *_spinner;
+    NSString *_currentUserCode;
+    BOOL _codeRevealed;
+    NSTimer *_codeMaskTimer;
 
-    /* Settings & Storage card */
+    /* Settings, Privacy & Storage card */
     UIView *_prefsCard;
     UISwitch *_shakeSwitch;
+    UISwitch *_lyricsSwitch;
     UILabel *_cacheLabel;
     UIButton *_clearCacheBtn;
 

@@ -12,57 +12,98 @@ permissions:
 jobs:
   build-armv6:
     runs-on: ubuntu-latest
+    env:
+      TOOLCHAIN_URL: https://github.com/L1ghtmann/llvm-project/releases/download/test-210562a/iOSToolchain-x86_64.tar.xz
+      TOOLCHAIN_SHA256: a72a7a577e2fbe2838b6b5e9c72034fa7d114af96f0e1d4b016f18730ce4056e
+      SDK_COMMIT: 3111c86f53b021dabee781aec3fb2d9fb8f3f862
+      SDK_ZIP_SHA256: f9e7c427bc0a57efb7d2452f5846932e1ea2fccc18f7e92c07fedf6c9d8b554f
+      MBEDTLS_COMMIT: 2fc8413bfcb51354c8e679141b17b3f1a5942561
+      MBEDTLS_SHA256: ffa596d4837f8668c5bc07f36c8bfdb5f4ace3a2cdc4e0f096ad27a9e3d58684
     steps:
       - name: Checkout EchoLegacy
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install build tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq clang make zip unzip curl xz-utils
+          sudo apt-get install -y -qq clang make zip unzip curl xz-utils coreutils
 
-      - name: Cache Theos Linux toolchain & iPhoneOS4.1.sdk
+      - name: Cache Theos Linux toolchain, iPhoneOS4.1.sdk & mbedTLS 2.28.10
         id: cache-sdk
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             /tmp/el_ci_toolchain
             /tmp/el_ci_sdks
             /tmp/el_ci_mbedtls
-          key: el-ios41-armv6-v1
+          key: el-ios41-armv6-v2-${{ hashFiles('.github/workflows/build.yml', 'third_party/mbedtls/include/mbedtls/el_user_config.h') }}
 
-      - name: Fetch Linux iOS Toolchain, iPhoneOS4.1.sdk & mbedTLS 2.28.10
+      - name: Fetch & SHA-256 Verify Linux iOS Toolchain, iPhoneOS4.1.sdk & mbedTLS 2.28.10
         if: steps.cache-sdk.outputs.cache-hit != 'true'
         run: |
+          set -euo pipefail
           mkdir -p /tmp/el_ci_toolchain /tmp/el_ci_sdks /tmp/el_ci_mbedtls
-          echo "Downloading L1ghtmann Linux iOS toolchain..."
-          curl -fsSL https://github.com/L1ghtmann/llvm-project/releases/latest/download/iOSToolchain-x86_64.tar.xz \
-            | tar -xJ -C /tmp/el_ci_toolchain
 
-          echo "Sparse-checking out iPhoneOS4.1.sdk..."
-          git clone --depth=1 --filter=blob:none --no-checkout https://github.com/Sn0wCooder/theos-sdks.git /tmp/sdk-src
-          cd /tmp/sdk-src
-          git sparse-checkout init --no-cone
-          git sparse-checkout set '/iPhoneOS4.1.sdk/**'
-          git checkout
-          cat iPhoneOS4.1.sdk/iPhoneOS4.1.sdk.zip.* > /tmp/iPhoneOS4.1.sdk.zip
+          echo "Downloading pinned L1ghtmann Linux iOS toolchain (test-210562a)..."
+          curl -fsSL "$TOOLCHAIN_URL" -o /tmp/iOSToolchain-x86_64.tar.xz
+          echo "${TOOLCHAIN_SHA256}  /tmp/iOSToolchain-x86_64.tar.xz" | sha256sum -c -
+          tar -xJf /tmp/iOSToolchain-x86_64.tar.xz -C /tmp/el_ci_toolchain
+          rm -f /tmp/iOSToolchain-x86_64.tar.xz
+
+          echo "Downloading pinned iPhoneOS4.1.sdk (${SDK_COMMIT})..."
+          curl -fsSL "https://raw.githubusercontent.com/Sn0wCooder/theos-sdks/${SDK_COMMIT}/iPhoneOS4.1.sdk/iPhoneOS4.1.sdk.zip.001" -o /tmp/iPhoneOS4.1.sdk.zip.001
+          curl -fsSL "https://raw.githubusercontent.com/Sn0wCooder/theos-sdks/${SDK_COMMIT}/iPhoneOS4.1.sdk/iPhoneOS4.1.sdk.zip.002" -o /tmp/iPhoneOS4.1.sdk.zip.002
+          cat /tmp/iPhoneOS4.1.sdk.zip.001 /tmp/iPhoneOS4.1.sdk.zip.002 > /tmp/iPhoneOS4.1.sdk.zip
+          rm -f /tmp/iPhoneOS4.1.sdk.zip.001 /tmp/iPhoneOS4.1.sdk.zip.002
+          echo "${SDK_ZIP_SHA256}  /tmp/iPhoneOS4.1.sdk.zip" | sha256sum -c -
           unzip -q /tmp/iPhoneOS4.1.sdk.zip -d /tmp/el_ci_sdks/
-          rm -rf /tmp/sdk-src /tmp/iPhoneOS4.1.sdk.zip
+          rm -f /tmp/iPhoneOS4.1.sdk.zip
 
-          echo "Downloading mbedTLS 2.28.10..."
-          curl -fsSL https://github.com/Mbed-TLS/mbedtls/archive/refs/tags/v2.28.10.tar.gz \
+          echo "Downloading pinned mbedTLS 2.28.10 (${MBEDTLS_COMMIT})..."
+          curl -fsSL "https://github.com/Mbed-TLS/mbedtls/archive/${MBEDTLS_COMMIT}.tar.gz" \
             -o /tmp/el_ci_mbedtls/mbedtls-2.28.10.tar.gz
+          echo "${MBEDTLS_SHA256}  /tmp/el_ci_mbedtls/mbedtls-2.28.10.tar.gz" | sha256sum -c -
 
-      - name: Unpack mbedTLS preserving el_user_config.h
+      - name: Verify cached mbedTLS tarball & unpack preserving el_user_config.h
         run: |
+          set -euo pipefail
+          echo "${MBEDTLS_SHA256}  /tmp/el_ci_mbedtls/mbedtls-2.28.10.tar.gz" | sha256sum -c -
           cp third_party/mbedtls/include/mbedtls/el_user_config.h /tmp/el_user_config.h
-          rm -rf third_party/mbedtls
+          rm -rf third_party/mbedtls "third_party/mbedtls-${MBEDTLS_COMMIT}"
           tar -xzf /tmp/el_ci_mbedtls/mbedtls-2.28.10.tar.gz -C third_party/
-          mv third_party/mbedtls-2.28.10 third_party/mbedtls
+          mv "third_party/mbedtls-${MBEDTLS_COMMIT}" third_party/mbedtls
           cp /tmp/el_user_config.h third_party/mbedtls/include/mbedtls/el_user_config.h
+
+      - name: Stamp Info.plist version & build number
+        id: stamp
+        run: |
+          set -euo pipefail
+          BUILD_NUM=$(( ${GITHUB_RUN_NUMBER:-1} + 1 ))
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            SEMVER="${BASH_REMATCH[1]}"
+          else
+            TAG="latest"
+            SEMVER="0.2.0"
+          fi
+          python3 - "$SEMVER" "$BUILD_NUM" << 'PY'
+          import plistlib, sys
+          semver, build_num = sys.argv[1], sys.argv[2]
+          with open("Info.plist", "rb") as f:
+              pl = plistlib.load(f)
+          pl["CFBundleShortVersionString"] = semver
+          pl["CFBundleVersion"] = str(build_num)
+          with open("Info.plist", "wb") as f:
+              plistlib.dump(pl, f, sort_keys=False)
+          PY
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "semver=$SEMVER" >> "$GITHUB_OUTPUT"
+          echo "build_num=$BUILD_NUM" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Resolve toolchain bin path & build mbedTLS + EchoLegacy IPA
         run: |
+          set -euo pipefail
           TC_BIN="$(dirname "$(find /tmp/el_ci_toolchain -name clang \( -type f -o -type l \) | head -n1)")"
           if [ ! -x "$TC_BIN/clang" ]; then
             echo "ERROR: clang not found in /tmp/el_ci_toolchain"
@@ -77,39 +118,55 @@ jobs:
           "$TC_BIN/lipo" -info build/EchoLegacy.app/EchoLegacy
           ls -lh build/EchoLegacy.app/EchoLegacy build/EchoLegacy.ipa
 
-      - name: Prepare release metadata & assets
+      - name: Prepare release metadata & SHA-256 asset manifest (version.json)
         id: meta
         run: |
+          set -euo pipefail
           mkdir -p dist
           cp build/EchoLegacy.ipa dist/EchoLegacy.ipa
           cp build/EchoLegacy.app/EchoLegacy dist/EchoLegacy
           cp build/EchoLegacy.app/Info.plist dist/Info.plist
           cp build/EchoLegacy.app/cacert.pem dist/cacert.pem
-          SHORT_SHA="${GITHUB_SHA::7}"
-          BUILD_NUM="${GITHUB_RUN_NUMBER}"
-          TAG="${GITHUB_REF_NAME}"
-          if [[ "$TAG" != v* ]]; then
-            TAG="latest"
-          fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
-          echo "build_num=$BUILD_NUM" >> "$GITHUB_OUTPUT"
-          printf '{"tag":"%s","build":%s,"sha":"%s"}\n' "$TAG" "$BUILD_NUM" "$SHORT_SHA" > dist/version.json
+
+          BIN_SIZE="$(stat -c '%s' dist/EchoLegacy)"
+          BIN_SHA="$(sha256sum dist/EchoLegacy | awk '{print $1}')"
+          PL_SIZE="$(stat -c '%s' dist/Info.plist)"
+          PL_SHA="$(sha256sum dist/Info.plist | awk '{print $1}')"
+          CA_SIZE="$(stat -c '%s' dist/cacert.pem)"
+          CA_SHA="$(sha256sum dist/cacert.pem | awk '{print $1}')"
+          IPA_SIZE="$(stat -c '%s' dist/EchoLegacy.ipa)"
+          IPA_SHA="$(sha256sum dist/EchoLegacy.ipa | awk '{print $1}')"
+
+          cat > dist/version.json <<EOF
+          {
+            "tag": "${{ steps.stamp.outputs.tag }}",
+            "version": "${{ steps.stamp.outputs.semver }}",
+            "build": ${{ steps.stamp.outputs.build_num }},
+            "sha": "${{ steps.stamp.outputs.short_sha }}",
+            "assets": {
+              "EchoLegacy": { "size": ${BIN_SIZE}, "sha256": "${BIN_SHA}" },
+              "Info.plist": { "size": ${PL_SIZE}, "sha256": "${PL_SHA}" },
+              "cacert.pem": { "size": ${CA_SIZE}, "sha256": "${CA_SHA}" },
+              "EchoLegacy.ipa": { "size": ${IPA_SIZE}, "sha256": "${IPA_SHA}" }
+            }
+          }
+          EOF
+          cat dist/version.json
 
       - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: EchoLegacy-armv6-build
           path: dist/
 
       - name: Publish GitHub Release (for On-Device Auto-Update)
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          tag_name: ${{ steps.meta.outputs.tag }}
-          name: "EchoLegacy Build #${{ steps.meta.outputs.build_num }} (${{ steps.meta.outputs.short_sha }})"
+          tag_name: ${{ steps.stamp.outputs.tag }}
+          name: "EchoLegacy v${{ steps.stamp.outputs.semver }} Build #${{ steps.stamp.outputs.build_num }} (${{ steps.stamp.outputs.short_sha }})"
           body: |
             Automated iOS 4.1 (`armv6`) build from commit `${{ github.sha }}`.
-            - Tap **Check for Updates** in EchoLegacy's **Account** tab to update directly on-device.
+            - Tap **Check for Updates** in EchoLegacy's **Account** tab to update directly on-device with SHA-256 verification.
             - Or sideload `EchoLegacy.ipa`.
           prerelease: false
           files: |

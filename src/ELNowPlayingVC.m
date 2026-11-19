@@ -16,6 +16,9 @@
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     [self becomeFirstResponder];
+    _lastDisplayedElapsedSec = -1;
+    _lastDisplayedDurationSec = -1;
+    [self refreshProgress];
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -167,6 +170,8 @@
     [_lyricsContainer addSubview:_lyricsStatusLabel];
 
     _activeLyricIndex = -1;
+    _lastDisplayedElapsedSec = -1;
+    _lastDisplayedDurationSec = -1;
 
     _queueBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
     _queueBtn.frame = CGRectMake(234.0f, 10.0f, 34.0f, 34.0f);
@@ -537,13 +542,27 @@
 }
 
 - (void)refreshProgress {
+    if (![self isViewLoaded] || !self.view.window) return;
     ELAudioEngine *eng = [ELAudioEngine sharedEngine];
     double dur = [eng duration];
     double cur = [eng currentTime];
-    _durationLabel.text = [ELTrack formatSeconds:dur];
+    NSInteger durSec = (dur > 0.0) ? (NSInteger)dur : 0;
+    if (durSec != _lastDisplayedDurationSec) {
+        _lastDisplayedDurationSec = durSec;
+        _durationLabel.text = [ELTrack formatSeconds:dur];
+    }
     if (!_isScrubbing) {
-        _elapsedLabel.text = [ELTrack formatSeconds:cur];
-        _scrubber.value = (dur > 0.0) ? (float)(cur / dur) : 0.0f;
+        NSInteger curSec = (cur > 0.0) ? (NSInteger)cur : 0;
+        if (curSec != _lastDisplayedElapsedSec) {
+            _lastDisplayedElapsedSec = curSec;
+            _elapsedLabel.text = [ELTrack formatSeconds:cur];
+        }
+        float targetVal = (dur > 0.0) ? (float)(cur / dur) : 0.0f;
+        if (targetVal < 0.0f) targetVal = 0.0f;
+        if (targetVal > 1.0f) targetVal = 1.0f;
+        if (fabsf(_scrubber.value - targetVal) >= 0.002f) {
+            _scrubber.value = targetVal;
+        }
     }
     if (_showingLyrics && [_lyricLines count] > 0) {
         [self updateActiveLyricForTime:cur];
@@ -696,6 +715,8 @@
 
     _lyricsGen++;
     _activeLyricIndex = -1;
+    _lastDisplayedElapsedSec = -1;
+    _lastDisplayedDurationSec = -1;
     [_lyricsVideoId release];
     _lyricsVideoId = [track.videoId copy];
     [_lyricLines release];
@@ -741,6 +762,8 @@
         _lyricLines = [lines retain];
         _lyricsStatusLabel.hidden = YES;
         _activeLyricIndex = -1;
+    _lastDisplayedElapsedSec = -1;
+    _lastDisplayedDurationSec = -1;
         [_lyricsTable reloadData];
         [self updateActiveLyricForTime:[[ELAudioEngine sharedEngine] currentTime]];
     } else {
@@ -768,10 +791,22 @@
     }
 
     if (found != _activeLyricIndex) {
+        NSInteger prevIdx = _activeLyricIndex;
         _activeLyricIndex = found;
-        [_lyricsTable reloadData];
+        if (prevIdx >= 0 && prevIdx < count) {
+            UITableViewCell *oldCell = [_lyricsTable cellForRowAtIndexPath:[NSIndexPath indexPathForRow:prevIdx inSection:0]];
+            if (oldCell) {
+                oldCell.textLabel.font = [UIFont systemFontOfSize:14.0f];
+                oldCell.textLabel.textColor = [UIColor colorWithWhite:1.0f alpha:0.46f];
+            }
+        }
         if (_activeLyricIndex >= 0 && _activeLyricIndex < count) {
             NSIndexPath *ip = [NSIndexPath indexPathForRow:_activeLyricIndex inSection:0];
+            UITableViewCell *newCell = [_lyricsTable cellForRowAtIndexPath:ip];
+            if (newCell) {
+                newCell.textLabel.font = [UIFont boldSystemFontOfSize:16.0f];
+                newCell.textLabel.textColor = [UIColor whiteColor];
+            }
             [_lyricsTable scrollToRowAtIndexPath:ip atScrollPosition:UITableViewScrollPositionMiddle animated:YES];
         }
     }

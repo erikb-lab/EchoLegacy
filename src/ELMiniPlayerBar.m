@@ -166,6 +166,7 @@
 
 - (void)likeWorker:(NSDictionary *)args {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    [NSThread setThreadPriority:0.25];
     ELTrack *track = [args objectForKey:@"track"];
     BOOL targetLiked = [[args objectForKey:@"targetLiked"] boolValue];
     NSString *err = nil;
@@ -207,13 +208,17 @@
 }
 
 - (void)refreshProgress {
+    if (self.hidden || !self.window) return;
     ELAudioEngine *eng = [ELAudioEngine sharedEngine];
     double dur = [eng duration];
     double cur = [eng currentTime];
     CGFloat frac = (dur > 0.0) ? (CGFloat)(cur / dur) : 0.0f;
     if (frac < 0.0f) frac = 0.0f;
     if (frac > 1.0f) frac = 1.0f;
-    _progressFill.frame = CGRectMake(0.0f, 0.0f, self.frame.size.width * frac, 2.0f);
+    CGFloat targetW = floorf(self.frame.size.width * frac * 2.0f) * 0.5f;
+    if (fabsf(_progressFill.frame.size.width - targetW) >= 0.5f) {
+        _progressFill.frame = CGRectMake(0.0f, 0.0f, targetW, 2.0f);
+    }
 }
 
 - (void)refresh {
@@ -245,44 +250,46 @@
         [_playPauseBtn setImage:icon forState:UIControlStateNormal];
     }
 
-    UIImage *localArt = [[ELDownloadManager sharedManager] localArtImageForVideoId:track.videoId];
-    if (localArt) {
-        NSString *localKey = [NSString stringWithFormat:@"local:%@", track.videoId];
-        if (![_loadedArtKey isEqualToString:localKey]) {
-            [_loadedArtKey release];
-            _loadedArtKey = [localKey copy];
-            [_loadedArtURL release];
-            _loadedArtURL = nil;
-            _artView.image = [ELTheme roundedThumbnailFromImage:localArt size:36.0f radius:5.0f cacheKey:localKey];
+    NSString *url = ([track.thumbURL length] > 0) ? track.thumbURL : track.artURL;
+    NSString *localKey = ([track.videoId length] > 0)
+        ? [NSString stringWithFormat:@"local:%@", track.videoId]
+        : @"";
+    NSString *cacheKey = ([url length] > 0) ? url : localKey;
+
+    if ([cacheKey length] > 0 && ![_loadedArtKey isEqualToString:cacheKey]) {
+        /* O(1) RAM lookup for pre-rendered 36x36 rounded thumbnail first */
+        UIImage *hit = [ELTheme cachedRoundedThumbnailForSize:36.0f radius:5.0f cacheKey:cacheKey];
+        if (!hit && [localKey length] > 0 && ![localKey isEqualToString:cacheKey]) {
+            hit = [ELTheme cachedRoundedThumbnailForSize:36.0f radius:5.0f cacheKey:localKey];
         }
-    } else {
-        NSString *url = ([track.thumbURL length] > 0) ? track.thumbURL : track.artURL;
-        if ([url length] > 0) {
-            if (![_loadedArtKey isEqualToString:url]) {
-                NSString *pendingKey = [NSString stringWithFormat:@"pending:%@", url];
-                UIImage *c = [[ELImageCache sharedCache] cachedImageForURL:url];
-                if (c) {
-                    [_loadedArtKey release];
-                    _loadedArtKey = [url copy];
-                    [_loadedArtURL release];
-                    _loadedArtURL = [url copy];
-                    _artView.image = [ELTheme roundedThumbnailFromImage:c size:36.0f radius:5.0f cacheKey:url];
-                } else if (![_loadedArtKey isEqualToString:pendingKey]) {
-                    [_loadedArtKey release];
-                    _loadedArtKey = [pendingKey copy];
-                    [_loadedArtURL release];
-                    _loadedArtURL = [url copy];
-                    _artView.image = [ELTheme roundedPlaceholderArtSize:36.0f radius:5.0f];
-                    [[ELImageCache sharedCache] loadImageForURL:url target:self action:@selector(onArtLoaded:)];
-                }
+        if (hit) {
+            [_loadedArtKey release];
+            _loadedArtKey = [cacheKey copy];
+            [_loadedArtURL release];
+            _loadedArtURL = [url copy];
+            _artView.image = hit;
+        } else {
+            NSString *pendingKey = [NSString stringWithFormat:@"pending:%@", cacheKey];
+            if (![_loadedArtKey isEqualToString:pendingKey]) {
+                [_loadedArtKey release];
+                _loadedArtKey = [pendingKey copy];
+                [_loadedArtURL release];
+                _loadedArtURL = [url copy];
+                _artView.image = [ELTheme roundedPlaceholderArtSize:36.0f radius:5.0f];
+                [[ELImageCache sharedCache] loadRoundedThumbnailForURL:url
+                                                               videoId:track.videoId
+                                                                  size:36.0f
+                                                                radius:5.0f
+                                                                target:self
+                                                                action:@selector(onArtLoaded:)];
             }
-        } else if (![_loadedArtKey isEqualToString:@"placeholder"]) {
-            [_loadedArtKey release];
-            _loadedArtKey = [@"placeholder" copy];
-            [_loadedArtURL release];
-            _loadedArtURL = nil;
-            _artView.image = [ELTheme roundedPlaceholderArtSize:36.0f radius:5.0f];
         }
+    } else if ([cacheKey length] == 0 && ![_loadedArtKey isEqualToString:@"placeholder"]) {
+        [_loadedArtKey release];
+        _loadedArtKey = [@"placeholder" copy];
+        [_loadedArtURL release];
+        _loadedArtURL = nil;
+        _artView.image = [ELTheme roundedPlaceholderArtSize:36.0f radius:5.0f];
     }
 
     [self refreshLikeState];
@@ -290,12 +297,18 @@
 }
 
 - (void)onArtLoaded:(NSDictionary *)info {
-    NSString *url = [info objectForKey:@"url"];
     UIImage *img = [info objectForKey:@"image"];
-    if (img && _loadedArtURL && [url isEqualToString:_loadedArtURL]) {
+    if (!img) return;
+    NSString *url = [info objectForKey:@"url"];
+    NSString *vid = [info objectForKey:@"videoId"];
+    ELTrack *cur = [[ELAudioEngine sharedEngine] currentTrack];
+    BOOL matchUrl = ([_loadedArtURL length] > 0 && [url length] > 0 && [_loadedArtURL isEqualToString:url]);
+    BOOL matchVid = (cur && [cur.videoId length] > 0 && [vid length] > 0 && [cur.videoId isEqualToString:vid]);
+    if (matchUrl || matchVid) {
+        NSString *key = ([url length] > 0) ? url : [NSString stringWithFormat:@"local:%@", vid];
         [_loadedArtKey release];
-        _loadedArtKey = [url copy];
-        _artView.image = [ELTheme roundedThumbnailFromImage:img size:36.0f radius:5.0f cacheKey:url];
+        _loadedArtKey = [key copy];
+        _artView.image = img;
     }
 }
 

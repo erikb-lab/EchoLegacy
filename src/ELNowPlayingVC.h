@@ -35,6 +35,8 @@
     NSInteger _likeRequestGen;
     NSInteger _lyricsGen;
     NSInteger _activeLyricIndex;
+    NSInteger _lastDisplayedElapsedSec;
+    NSInteger _lastDisplayedDurationSec;
     NSArray *_lyricLines;
     NSString *_lyricsVideoId;
     NSString *_inFlightLikeVideoId;

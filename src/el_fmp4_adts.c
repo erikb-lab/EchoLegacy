@@ -188,12 +188,20 @@ static void parse_esds(el_fmp4_ctx_t *ctx, const uint8_t *buf, size_t len) {
             if (pos + 3 > len) break;
             uint8_t flags = buf[pos + 2];
             pos += 3;
-            if (flags & 0x80) pos += 2;
+            if (flags & 0x80) {
+                if (pos + 2 > len) break;
+                pos += 2;
+            }
             if (flags & 0x40) {
                 if (pos >= len) break;
-                pos += 1 + buf[pos];
+                size_t ulen = buf[pos];
+                if (pos + 1 + ulen > len) break;
+                pos += 1 + ulen;
             }
-            if (flags & 0x20) pos += 2;
+            if (flags & 0x20) {
+                if (pos + 2 > len) break;
+                pos += 2;
+            }
         } else if (tag == 0x04) {
             /* DecoderConfigDescrTag: 13 bytes fixed header, followed by child descriptors */
             if (pos + 13 > len) break;
@@ -218,24 +226,29 @@ static void parse_esds(el_fmp4_ctx_t *ctx, const uint8_t *buf, size_t len) {
             }
             return;
         } else {
+            if (dlen > len - pos) break;
             pos += dlen;
         }
     }
 }
 
-static void parse_moov_children(el_fmp4_ctx_t *ctx, const uint8_t *buf, size_t len) {
+#define EL_FMP4_MAX_BOX_DEPTH 8
+
+static void parse_moov_children(el_fmp4_ctx_t *ctx, const uint8_t *buf, size_t len, int depth) {
+    if (depth > EL_FMP4_MAX_BOX_DEPTH) return;
     size_t pos = 0;
     while (pos + 8 <= len) {
         uint64_t bsz = rd32(buf + pos);
         uint32_t btype = rd32(buf + pos + 4);
         size_t hdr = 8;
-        if (bsz == 1 && pos + 16 <= len) {
+        if (bsz == 1) {
+            if (pos + 16 > len) break;
             bsz = rd64(buf + pos + 8);
             hdr = 16;
         } else if (bsz == 0) {
             bsz = len - pos;
         }
-        if (bsz < hdr || pos + bsz > len) break;
+        if (bsz < hdr || bsz > len - pos) break;
 
         const uint8_t *payload = buf + pos + hdr;
         size_t plen = (size_t)(bsz - hdr);
@@ -245,7 +258,7 @@ static void parse_moov_children(el_fmp4_ctx_t *ctx, const uint8_t *buf, size_t l
             btype == fourcc('m','i','n','f') ||
             btype == fourcc('s','t','b','l') ||
             btype == fourcc('m','v','e','x')) {
-            parse_moov_children(ctx, payload, plen);
+            parse_moov_children(ctx, payload, plen, depth + 1);
         } else if (btype == fourcc('m','v','h','d')) {
             if (plen >= 20) {
                 uint8_t ver = payload[0];
@@ -267,7 +280,7 @@ static void parse_moov_children(el_fmp4_ctx_t *ctx, const uint8_t *buf, size_t l
         } else if (btype == fourcc('s','t','s','d')) {
             /* FullBox(4) + entry_count(4) + child sample entries (e.g. mp4a) */
             if (plen > 8) {
-                parse_moov_children(ctx, payload + 8, plen - 8);
+                parse_moov_children(ctx, payload + 8, plen - 8, depth + 1);
             }
         } else if (btype == fourcc('m','p','4','a')) {
             /* AudioSampleEntry: 28 bytes fixed header, then child boxes (esds) */
@@ -283,7 +296,7 @@ static void parse_moov_children(el_fmp4_ctx_t *ctx, const uint8_t *buf, size_t l
                         }
                     }
                 }
-                parse_moov_children(ctx, payload + 28, plen - 28);
+                parse_moov_children(ctx, payload + 28, plen - 28, depth + 1);
             }
         } else if (btype == fourcc('e','s','d','s')) {
             parse_esds(ctx, payload, plen);
@@ -318,6 +331,7 @@ static void parse_sidx(el_fmp4_ctx_t *ctx, const uint8_t *buf, size_t len, uint6
     pos += 4;
 
     if (ref_count == 0 || pos + (size_t)ref_count * 12 > len) return;
+    if (UINT64_MAX - sidx_end_pos < first_offset) return;
 
     el_sidx_entry_t *entries = (el_sidx_entry_t *)malloc(sizeof(el_sidx_entry_t) * ref_count);
     if (!entries) return;
@@ -329,6 +343,10 @@ static void parse_sidx(el_fmp4_ctx_t *ctx, const uint8_t *buf, size_t len, uint6
         uint32_t subseg_dur = rd32(buf + pos + 4);
         pos += 12;
         uint32_t ref_size = w0 & 0x7FFFFFFFu;
+        if (UINT64_MAX - cur_offset < ref_size || UINT64_MAX - cur_time < subseg_dur) {
+            free(entries);
+            return;
+        }
         entries[i].byte_offset = cur_offset;
         entries[i].byte_size = ref_size;
         entries[i].start_sec = (double)cur_time / (double)timescale;
@@ -359,11 +377,14 @@ static void parse_moof(el_fmp4_ctx_t *ctx, const uint8_t *buf, size_t len) {
         uint64_t bsz = rd32(buf + pos);
         uint32_t btype = rd32(buf + pos + 4);
         size_t hdr = 8;
-        if (bsz == 1 && pos + 16 <= len) {
+        if (bsz == 1) {
+            if (pos + 16 > len) break;
             bsz = rd64(buf + pos + 8);
             hdr = 16;
+        } else if (bsz == 0) {
+            bsz = len - pos;
         }
-        if (bsz < hdr || pos + bsz > len) break;
+        if (bsz < hdr || bsz > len - pos) break;
 
         if (btype == fourcc('t','r','a','f')) {
             const uint8_t *tbuf = buf + pos + hdr;
@@ -373,27 +394,58 @@ static void parse_moof(el_fmp4_ctx_t *ctx, const uint8_t *buf, size_t len) {
                 uint64_t csz = rd32(tbuf + tpos);
                 uint32_t ctype = rd32(tbuf + tpos + 4);
                 size_t chdr = 8;
-                if (csz < chdr || tpos + csz > tlen) break;
+                if (csz == 1) {
+                    if (tpos + 16 > tlen) break;
+                    csz = rd64(tbuf + tpos + 8);
+                    chdr = 16;
+                } else if (csz == 0) {
+                    csz = tlen - tpos;
+                }
+                if (csz < chdr || csz > tlen - tpos) break;
                 const uint8_t *cp = tbuf + tpos + chdr;
                 size_t clen = (size_t)(csz - chdr);
 
                 if (ctype == fourcc('t','f','h','d') && clen >= 8) {
                     uint32_t flags = rd32(cp) & 0x00FFFFFFu;
                     size_t off = 8; /* flags(4) + track_id(4) */
-                    if (flags & 0x000001u) off += 8; /* base_data_offset */
-                    if (flags & 0x000002u) off += 4; /* sample_description_index */
-                    if (flags & 0x000008u) off += 4; /* default_sample_duration */
-                    if ((flags & 0x000010u) && off + 4 <= clen) {
+                    if (flags & 0x000001u) {
+                        if (off + 8 > clen) { tpos += (size_t)csz; continue; }
+                        off += 8; /* base_data_offset */
+                    }
+                    if (flags & 0x000002u) {
+                        if (off + 4 > clen) { tpos += (size_t)csz; continue; }
+                        off += 4; /* sample_description_index */
+                    }
+                    if (flags & 0x000008u) {
+                        if (off + 4 > clen) { tpos += (size_t)csz; continue; }
+                        off += 4; /* default_sample_duration */
+                    }
+                    if (flags & 0x000010u) {
+                        if (off + 4 > clen) { tpos += (size_t)csz; continue; }
                         tfhd_def_size = rd32(cp + off);
                     }
                 } else if (ctype == fourcc('t','r','u','n') && clen >= 8) {
                     uint32_t flags = rd32(cp) & 0x00FFFFFFu;
                     uint32_t scount = rd32(cp + 4);
                     size_t off = 8;
-                    if (flags & 0x000001u) off += 4; /* data_offset */
-                    if (flags & 0x000004u) off += 4; /* first_sample_flags */
+                    if (flags & 0x000001u) {
+                        if (off + 4 > clen) { tpos += (size_t)csz; continue; }
+                        off += 4; /* data_offset */
+                    }
+                    if (flags & 0x000004u) {
+                        if (off + 4 > clen) { tpos += (size_t)csz; continue; }
+                        off += 4; /* first_sample_flags */
+                    }
 
-                    if (scount > 0 && scount < 65536) {
+                    size_t row_bytes = 0;
+                    if (flags & 0x000100u) row_bytes += 4; /* sample_duration */
+                    if (flags & 0x000200u) row_bytes += 4; /* sample_size */
+                    if (flags & 0x000400u) row_bytes += 4; /* sample_flags */
+                    if (flags & 0x000800u) row_bytes += 4; /* sample_composition_time_offset */
+
+                    if (scount > 0 && scount <= 65536 &&
+                        ctx->sample_count + scount <= 65536 &&
+                        (uint64_t)scount * (uint64_t)row_bytes <= (uint64_t)(clen - off)) {
                         if (ctx->sample_count + scount > ctx->sample_cap) {
                             size_t ncap = ctx->sample_count + scount + 64;
                             uint32_t *narr = (uint32_t *)realloc(ctx->sample_sizes, ncap * sizeof(uint32_t));
@@ -403,14 +455,13 @@ static void parse_moof(el_fmp4_ctx_t *ctx, const uint8_t *buf, size_t len) {
                         }
                         for (uint32_t i = 0; i < scount; i++) {
                             uint32_t ssz = tfhd_def_size;
-                            if (flags & 0x000100u) off += 4; /* sample_duration */
+                            if (flags & 0x000100u) off += 4;
                             if (flags & 0x000200u) {
-                                if (off + 4 > clen) break;
                                 ssz = rd32(cp + off);
                                 off += 4;
                             }
-                            if (flags & 0x000400u) off += 4; /* sample_flags */
-                            if (flags & 0x000800u) off += 4; /* sample_composition_time_offset */
+                            if (flags & 0x000400u) off += 4;
+                            if (flags & 0x000800u) off += 4;
                             ctx->sample_sizes[ctx->sample_count++] = ssz;
                         }
                     }
@@ -438,7 +489,7 @@ static inline void write_adts_header(const el_fmp4_ctx_t *ctx, uint8_t *hdr, uin
 
 static void finish_buffered_box(el_fmp4_ctx_t *ctx) {
     if (ctx->box_type == fourcc('m','o','o','v')) {
-        parse_moov_children(ctx, ctx->box_buf, ctx->box_buf_len);
+        parse_moov_children(ctx, ctx->box_buf, ctx->box_buf_len, 0);
     } else if (ctx->box_type == fourcc('s','i','d','x')) {
         parse_sidx(ctx, ctx->box_buf, ctx->box_buf_len, ctx->box_end_pos);
     } else if (ctx->box_type == fourcc('m','o','o','f')) {
@@ -554,9 +605,7 @@ int el_fmp4_feed(el_fmp4_ctx_t *ctx, const uint8_t *data, size_t len) {
 
             uint32_t fsize = ctx->sample_sizes[ctx->sample_idx];
             if (fsize == 0 || fsize > 65535) {
-                ctx->sample_idx++;
-                ctx->frame_filled = 0;
-                continue;
+                return -5;
             }
 
             if (fsize + 7 > ctx->frame_cap) {

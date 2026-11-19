@@ -10,6 +10,7 @@
     ELMiniPlayerBar *_miniPlayerBar;
     UILabel *_toastLabel;
     NSTimer *_toastTimer;
+    UIView *_privacyShieldView;
 }
 
 @property (nonatomic, retain) ELWindow *window;

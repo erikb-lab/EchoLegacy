@@ -4,13 +4,40 @@
 #import "ELTheme.h"
 #import "ELTrackCell.h"
 #import "ELYouTubeClient.h"
+#import <sys/stat.h>
+
+static void el_harden_history_path(NSString *path, mode_t mode, BOOL isDirectory) {
+    if ([path length] == 0) return;
+    const char *fsPath = [path fileSystemRepresentation];
+    if (fsPath) {
+        chmod(fsPath, mode);
+    }
+    NSMutableDictionary *attrs = [NSMutableDictionary dictionaryWithObject:[NSNumber numberWithUnsignedLong:(unsigned long)mode]
+                                                                    forKey:NSFilePosixPermissions];
+    if (!isDirectory) {
+        [attrs setObject:NSFileProtectionComplete forKey:NSFileProtectionKey];
+    }
+    [[NSFileManager defaultManager] setAttributes:attrs ofItemAtPath:path error:nil];
+}
 
 static NSString *el_history_path(void) {
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
     NSString *docs = ([paths count] > 0) ? [paths objectAtIndex:0] : NSTemporaryDirectory();
     NSString *dir = [docs stringByAppendingPathComponent:@"EchoLegacy"];
-    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    NSDictionary *dirAttrs = [NSDictionary dictionaryWithObject:[NSNumber numberWithUnsignedLong:0700UL]
+                                                         forKey:NSFilePosixPermissions];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                              withIntermediateDirectories:YES
+                                               attributes:dirAttrs
+                                                    error:nil];
+    el_harden_history_path(dir, 0700, YES);
     return [dir stringByAppendingPathComponent:@"search_history.plist"];
+}
+
+static void el_save_history_array(NSArray *queries) {
+    NSString *path = el_history_path();
+    [queries writeToFile:path atomically:YES];
+    el_harden_history_path(path, 0600, NO);
 }
 
 @implementation ELSearchVC
@@ -24,8 +51,19 @@ static NSString *el_history_path(void) {
                                                            tag:1] autorelease];
         _results = [[NSArray alloc] init];
         _recentQueries = [[NSMutableArray alloc] init];
-        NSArray *saved = [NSArray arrayWithContentsOfFile:el_history_path()];
-        if ([saved isKindOfClass:[NSArray class]]) [_recentQueries addObjectsFromArray:saved];
+        NSString *histPath = el_history_path();
+        if ([[NSFileManager defaultManager] fileExistsAtPath:histPath]) {
+            el_harden_history_path(histPath, 0600, NO);
+        }
+        NSArray *saved = [NSArray arrayWithContentsOfFile:histPath];
+        if ([saved isKindOfClass:[NSArray class]]) {
+            for (id item in saved) {
+                if ([item isKindOfClass:[NSString class]] && [item length] > 0 && [item length] <= 128) {
+                    [_recentQueries addObject:item];
+                    if ([_recentQueries count] >= 10) break;
+                }
+            }
+        }
         _showingHistory = YES;
     }
     return self;
@@ -165,17 +203,18 @@ static NSString *el_history_path(void) {
 
 - (void)onClearHistory {
     [_recentQueries removeAllObjects];
-    [_recentQueries writeToFile:el_history_path() atomically:YES];
+    el_save_history_array(_recentQueries);
     [self updateEmptyHint];
     [_tableView reloadData];
 }
 
 - (void)recordQuery:(NSString *)q {
     if ([q length] == 0) return;
+    if ([q length] > 128) q = [q substringToIndex:128];
     [_recentQueries removeObject:q];
     [_recentQueries insertObject:q atIndex:0];
     while ([_recentQueries count] > 10) [_recentQueries removeLastObject];
-    [_recentQueries writeToFile:el_history_path() atomically:YES];
+    el_save_history_array(_recentQueries);
 }
 
 - (void)runSearchForQuery:(NSString *)q {

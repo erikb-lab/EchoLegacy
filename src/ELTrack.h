@@ -1,5 +1,20 @@
 #import <Foundation/Foundation.h>
 
+/* Validates YouTube videoId against ^[A-Za-z0-9_-]{11}$ to block path traversal and injection. */
+static inline BOOL el_is_valid_video_id(NSString *videoId) {
+    if (!videoId || ![videoId isKindOfClass:[NSString class]]) return NO;
+    if ([videoId length] != 11) return NO;
+    for (NSUInteger i = 0; i < 11; i++) {
+        unichar c = [videoId characterAtIndex:i];
+        BOOL ok = ((c >= 'A' && c <= 'Z') ||
+                   (c >= 'a' && c <= 'z') ||
+                   (c >= '0' && c <= '9') ||
+                   c == '_' || c == '-');
+        if (!ok) return NO;
+    }
+    return YES;
+}
+
 @interface ELTrack : NSObject {
     NSString *_videoId;
     NSString *_title;

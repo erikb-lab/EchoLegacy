@@ -37,7 +37,7 @@
 + (ELTrack *)trackFromDictionary:(NSDictionary *)dict {
     if (![dict isKindOfClass:[NSDictionary class]]) return nil;
     NSString *vid = [dict objectForKey:@"videoId"];
-    if (![vid isKindOfClass:[NSString class]] || [vid length] == 0) return nil;
+    if (!el_is_valid_video_id(vid)) return nil;
     ELTrack *t = [[[ELTrack alloc] init] autorelease];
     t.videoId = vid;
     t.title = [[dict objectForKey:@"title"] isKindOfClass:[NSString class]] ? [dict objectForKey:@"title"] : @"Untitled";

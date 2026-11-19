@@ -1,8 +1,13 @@
 #import "ELLyricsClient.h"
 #import "ELHTTPClient.h"
 #import "ELJSON.h"
+#include <math.h>
+
+#define EL_MAX_LYRICS_BYTES (64U * 1024U)
+#define EL_MAX_LYRICS_LINES 2000U
 
 static NSString *const kLyricsUserAgent = @"EchoLegacy/1.0 (iPhoneOS 4.1; lrclib)";
+static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
 
 @implementation ELLyricLine
 @synthesize timeSeconds = _timeSeconds;
@@ -97,11 +102,12 @@ static NSInteger el_compare_lyric_lines(id a, id b, void *ctx) {
 }
 
 static NSArray *el_parse_lrc_string(NSString *lrc) {
-    if ([lrc length] == 0) return [NSArray array];
+    if ([lrc length] == 0 || [lrc length] > EL_MAX_LYRICS_BYTES) return [NSArray array];
     NSMutableArray *lines = [NSMutableArray array];
     NSArray *rawLines = [lrc componentsSeparatedByString:@"\n"];
 
     for (NSString *raw in rawLines) {
+        if ([lines count] >= EL_MAX_LYRICS_LINES) break;
         NSString *line = [raw stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"\r"]];
         if ([line length] == 0) continue;
 
@@ -130,6 +136,7 @@ static NSArray *el_parse_lrc_string(NSString *lrc) {
         if ([text length] == 0) text = @" ";
 
         for (NSNumber *num in times) {
+            if ([lines count] >= EL_MAX_LYRICS_LINES) break;
             ELLyricLine *item = [[[ELLyricLine alloc] init] autorelease];
             item.timeSeconds = [num doubleValue];
             item.text = text;
@@ -142,10 +149,11 @@ static NSArray *el_parse_lrc_string(NSString *lrc) {
 }
 
 static NSArray *el_parse_plain_lyrics(NSString *plain) {
-    if ([plain length] == 0) return [NSArray array];
+    if ([plain length] == 0 || [plain length] > EL_MAX_LYRICS_BYTES) return [NSArray array];
     NSMutableArray *lines = [NSMutableArray array];
     NSArray *rawLines = [plain componentsSeparatedByString:@"\n"];
     for (NSString *raw in rawLines) {
+        if ([lines count] >= EL_MAX_LYRICS_LINES) break;
         NSString *text = [raw stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"\r \t"]];
         if ([text length] == 0) continue;
         ELLyricLine *item = [[[ELLyricLine alloc] init] autorelease];
@@ -156,6 +164,80 @@ static NSArray *el_parse_plain_lyrics(NSString *plain) {
     return lines;
 }
 
+static NSString *el_normalize_match_text(NSString *s) {
+    if ([s length] == 0) return @"";
+    NSString *lower = [s lowercaseString];
+    NSCharacterSet *alnum = [NSCharacterSet alphanumericCharacterSet];
+    NSMutableString *out = [NSMutableString stringWithCapacity:[lower length]];
+    BOOL lastSpace = YES;
+    for (NSUInteger i = 0; i < [lower length]; i++) {
+        unichar c = [lower characterAtIndex:i];
+        if ([alnum characterIsMember:c]) {
+            [out appendFormat:@"%C", c];
+            lastSpace = NO;
+        } else if (!lastSpace) {
+            [out appendString:@" "];
+            lastSpace = YES;
+        }
+    }
+    return [out stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+}
+
+static BOOL el_has_token_similarity(NSString *normA, NSString *normB) {
+    if ([normA length] == 0 || [normB length] == 0) return NO;
+    if ([normA rangeOfString:normB].location != NSNotFound ||
+        [normB rangeOfString:normA].location != NSNotFound) {
+        return YES;
+    }
+    NSArray *toksA = [normA componentsSeparatedByString:@" "];
+    NSArray *toksB = [normB componentsSeparatedByString:@" "];
+    NSUInteger significantA = 0;
+    NSUInteger matchedA = 0;
+    for (NSString *ta in toksA) {
+        if ([ta length] < 2) continue;
+        significantA++;
+        if ([toksB containsObject:ta]) {
+            matchedA++;
+        }
+    }
+    if (significantA == 0) return NO;
+    return (matchedA * 2 >= significantA && matchedA > 0);
+}
+
+static BOOL el_lrclib_item_matches_track(NSDictionary *item,
+                                         NSString *cleanTitle,
+                                         NSString *cleanArtist,
+                                         NSInteger durationSeconds) {
+    if (![item isKindOfClass:[NSDictionary class]]) return NO;
+
+    NSString *candTitle = [ELJSON string:item forKey:@"trackName"];
+    if ([candTitle length] == 0) candTitle = [ELJSON string:item forKey:@"name"];
+    NSString *normTargetTitle = el_normalize_match_text(cleanTitle);
+    NSString *normCandTitle = el_normalize_match_text(candTitle);
+    if (!el_has_token_similarity(normTargetTitle, normCandTitle)) {
+        return NO;
+    }
+
+    if ([cleanArtist length] > 0 &&
+        [cleanArtist caseInsensitiveCompare:@"Unknown Artist"] != NSOrderedSame &&
+        [cleanArtist caseInsensitiveCompare:@"YouTube Music"] != NSOrderedSame) {
+        NSString *candArtist = [ELJSON string:item forKey:@"artistName"];
+        NSString *normTargetArtist = el_normalize_match_text(cleanArtist);
+        NSString *normCandArtist = el_normalize_match_text(candArtist);
+        if ([normTargetArtist length] > 0 && !el_has_token_similarity(normTargetArtist, normCandArtist)) {
+            return NO;
+        }
+    }
+
+    NSNumber *candDurNum = [ELJSON number:item forKey:@"duration"];
+    if (durationSeconds > 0 && candDurNum && [candDurNum doubleValue] > 0.0) {
+        if (fabs([candDurNum doubleValue] - (double)durationSeconds) > 15.0) {
+            return NO;
+        }
+    }
+    return YES;
+}
+
 @implementation ELLyricsClient
 
 + (ELLyricsClient *)sharedClient {
@@ -164,6 +246,15 @@ static NSArray *el_parse_plain_lyrics(NSString *plain) {
         if (!shared) shared = [[ELLyricsClient alloc] init];
     }
     return shared;
+}
+
++ (BOOL)isOnlineLyricsEnabled {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:kOnlineLyricsDefaultsKey];
+}
+
++ (void)setOnlineLyricsEnabled:(BOOL)enabled {
+    [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:kOnlineLyricsDefaultsKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
 }
 
 - (id)init {
@@ -187,39 +278,47 @@ static NSArray *el_parse_plain_lyrics(NSString *plain) {
 }
 
 - (NSString *)lyricsFilePathForVideoId:(NSString *)videoId {
-    if ([videoId length] == 0) return nil;
+    if (!el_is_valid_video_id(videoId)) return nil;
     return [_lyricsDir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.lrc", videoId]];
 }
 
 - (NSString *)plainLyricsFilePathForVideoId:(NSString *)videoId {
-    if ([videoId length] == 0) return nil;
+    if (!el_is_valid_video_id(videoId)) return nil;
     return [_lyricsDir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.txt", videoId]];
 }
 
 - (NSArray *)cachedLyricsForVideoId:(NSString *)videoId {
-    if ([videoId length] == 0) return nil;
+    if (!el_is_valid_video_id(videoId)) return nil;
     NSFileManager *fm = [[[NSFileManager alloc] init] autorelease];
     NSString *lrcPath = [self lyricsFilePathForVideoId:videoId];
     if (lrcPath && [fm fileExistsAtPath:lrcPath]) {
-        NSString *raw = [NSString stringWithContentsOfFile:lrcPath encoding:NSUTF8StringEncoding error:nil];
-        if ([raw length] > 0) {
-            NSArray *parsed = el_parse_lrc_string(raw);
-            if ([parsed count] > 0) return parsed;
+        NSDictionary *attrs = [fm attributesOfItemAtPath:lrcPath error:nil];
+        unsigned long long fsz = [[attrs objectForKey:NSFileSize] unsignedLongLongValue];
+        if (fsz > 0 && fsz <= EL_MAX_LYRICS_BYTES) {
+            NSString *raw = [NSString stringWithContentsOfFile:lrcPath encoding:NSUTF8StringEncoding error:nil];
+            if ([raw length] > 0 && [raw length] <= EL_MAX_LYRICS_BYTES) {
+                NSArray *parsed = el_parse_lrc_string(raw);
+                if ([parsed count] > 0) return parsed;
+            }
         }
     }
     NSString *txtPath = [self plainLyricsFilePathForVideoId:videoId];
     if (txtPath && [fm fileExistsAtPath:txtPath]) {
-        NSString *raw = [NSString stringWithContentsOfFile:txtPath encoding:NSUTF8StringEncoding error:nil];
-        if ([raw length] > 0) {
-            NSArray *parsed = el_parse_plain_lyrics(raw);
-            if ([parsed count] > 0) return parsed;
+        NSDictionary *attrs = [fm attributesOfItemAtPath:txtPath error:nil];
+        unsigned long long fsz = [[attrs objectForKey:NSFileSize] unsignedLongLongValue];
+        if (fsz > 0 && fsz <= EL_MAX_LYRICS_BYTES) {
+            NSString *raw = [NSString stringWithContentsOfFile:txtPath encoding:NSUTF8StringEncoding error:nil];
+            if ([raw length] > 0 && [raw length] <= EL_MAX_LYRICS_BYTES) {
+                NSArray *parsed = el_parse_plain_lyrics(raw);
+                if ([parsed count] > 0) return parsed;
+            }
         }
     }
     return nil;
 }
 
 - (void)deleteCachedLyricsForVideoId:(NSString *)videoId {
-    if ([videoId length] == 0) return;
+    if (!el_is_valid_video_id(videoId)) return;
     NSFileManager *fm = [[[NSFileManager alloc] init] autorelease];
     NSString *lrcPath = [self lyricsFilePathForVideoId:videoId];
     NSString *txtPath = [self plainLyricsFilePathForVideoId:videoId];
@@ -230,23 +329,23 @@ static NSArray *el_parse_plain_lyrics(NSString *plain) {
 - (NSArray *)processLRCLibItem:(NSDictionary *)item videoId:(NSString *)videoId {
     if (![item isKindOfClass:[NSDictionary class]]) return nil;
     NSString *synced = [ELJSON string:item forKey:@"syncedLyrics"];
-    if ([synced length] > 0) {
+    if ([synced length] > 0 && [synced length] <= EL_MAX_LYRICS_BYTES) {
         NSArray *parsed = el_parse_lrc_string(synced);
         if ([parsed count] > 0) {
-            if ([videoId length] > 0) {
+            if (el_is_valid_video_id(videoId)) {
                 NSString *path = [self lyricsFilePathForVideoId:videoId];
-                [synced writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                if (path) [synced writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
             }
             return parsed;
         }
     }
     NSString *plain = [ELJSON string:item forKey:@"plainLyrics"];
-    if ([plain length] > 0) {
+    if ([plain length] > 0 && [plain length] <= EL_MAX_LYRICS_BYTES) {
         NSArray *parsed = el_parse_plain_lyrics(plain);
         if ([parsed count] > 0) {
-            if ([videoId length] > 0) {
+            if (el_is_valid_video_id(videoId)) {
                 NSString *path = [self plainLyricsFilePathForVideoId:videoId];
-                [plain writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                if (path) [plain writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
             }
             return parsed;
         }
@@ -262,6 +361,11 @@ static NSArray *el_parse_plain_lyrics(NSString *plain) {
 
     NSArray *cached = [self cachedLyricsForVideoId:track.videoId];
     if ([cached count] > 0) return cached;
+
+    if (![ELLyricsClient isOnlineLyricsEnabled]) {
+        if (outError) *outError = @"Online lyrics disabled in Account settings";
+        return nil;
+    }
 
     NSString *artist = el_clean_track_query_part(track.artist);
     NSString *title = el_clean_track_query_part(track.title);
@@ -280,11 +384,18 @@ static NSArray *el_parse_plain_lyrics(NSString *plain) {
         if (track.durationSeconds > 0) {
             [url appendFormat:@"&duration=%ld", (long)track.durationSeconds];
         }
-        ELHTTPResponse *resp = [[ELHTTPClient sharedClient] getURL:url headers:headers];
-        if (resp.statusCode == 200 && resp.body) {
-            id json = [ELJSON objectWithData:resp.body];
-            NSArray *lines = [self processLRCLibItem:json videoId:track.videoId];
-            if ([lines count] > 0) return lines;
+        if (ELValidateHTTPSURL(url, ELHostCategoryLyrics, NULL, NULL, NULL)) {
+            ELHTTPResponse *resp = [[ELHTTPClient sharedClient] getURL:url
+                                                               headers:headers
+                                                              maxBytes:EL_MAX_LYRICS_BYTES];
+            if (resp && resp.statusCode == 200 && resp.body && [resp.body length] <= EL_MAX_LYRICS_BYTES) {
+                id json = [ELJSON objectWithData:resp.body];
+                if ([json isKindOfClass:[NSDictionary class]] &&
+                    el_lrclib_item_matches_track((NSDictionary *)json, title, artist, track.durationSeconds)) {
+                    NSArray *lines = [self processLRCLibItem:(NSDictionary *)json videoId:track.videoId];
+                    if ([lines count] > 0) return lines;
+                }
+            }
         }
     }
 
@@ -293,27 +404,35 @@ static NSArray *el_parse_plain_lyrics(NSString *plain) {
         ? [NSString stringWithFormat:@"%@ %@", artist, title]
         : title;
     NSString *searchURL = [NSString stringWithFormat:@"https://lrclib.net/api/search?q=%@", el_url_encode(q)];
-    ELHTTPResponse *searchResp = [[ELHTTPClient sharedClient] getURL:searchURL headers:headers];
+    if (!ELValidateHTTPSURL(searchURL, ELHostCategoryLyrics, NULL, NULL, NULL)) {
+        if (outError) *outError = @"Invalid lyrics URL";
+        return nil;
+    }
+    ELHTTPResponse *searchResp = [[ELHTTPClient sharedClient] getURL:searchURL
+                                                             headers:headers
+                                                            maxBytes:EL_MAX_LYRICS_BYTES];
     if (searchResp.errorMessage) {
         if (outError) *outError = searchResp.errorMessage;
         return nil;
     }
-    if (searchResp.statusCode == 200 && searchResp.body) {
+    if (searchResp.statusCode == 200 && searchResp.body && [searchResp.body length] <= EL_MAX_LYRICS_BYTES) {
         id json = [ELJSON objectWithData:searchResp.body];
         if ([json isKindOfClass:[NSArray class]]) {
             NSArray *arr = (NSArray *)json;
-            /* Prefer an entry with syncedLyrics */
+            /* Prefer a validated entry with syncedLyrics */
             for (id item in arr) {
                 if (![item isKindOfClass:[NSDictionary class]]) continue;
+                if (!el_lrclib_item_matches_track((NSDictionary *)item, title, artist, track.durationSeconds)) continue;
                 NSString *synced = [ELJSON string:item forKey:@"syncedLyrics"];
-                if ([synced length] > 0) {
+                if ([synced length] > 0 && [synced length] <= EL_MAX_LYRICS_BYTES) {
                     NSArray *lines = [self processLRCLibItem:item videoId:track.videoId];
                     if ([lines count] > 0) return lines;
                 }
             }
-            /* Fallback to first entry with plainLyrics */
+            /* Fallback to first validated entry with plainLyrics */
             for (id item in arr) {
                 if (![item isKindOfClass:[NSDictionary class]]) continue;
+                if (!el_lrclib_item_matches_track((NSDictionary *)item, title, artist, track.durationSeconds)) continue;
                 NSArray *lines = [self processLRCLibItem:item videoId:track.videoId];
                 if ([lines count] > 0) return lines;
             }

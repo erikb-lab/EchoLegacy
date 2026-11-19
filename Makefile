@@ -26,6 +26,7 @@ ARCH_FLAGS  := -target armv6-apple-darwin10 -arch armv6 -mcpu=arm1176jzf-s \
 
 COMMON_FLAGS := $(ARCH_FLAGS) \
                 -Os -fvisibility=hidden -ffunction-sections -fdata-sections \
+                -fstack-protector -D_FORTIFY_SOURCE=2 -Wformat -Wformat-security \
                 -Wall -Wextra -Wno-unused-parameter -Wno-deprecated-declarations \
                 -DMBEDTLS_USER_CONFIG_FILE=\"mbedtls/el_user_config.h\" \
                 -Isrc -I$(MBED_INC) -I$(CJSON_DIR)
@@ -33,6 +34,7 @@ COMMON_FLAGS := $(ARCH_FLAGS) \
 CFLAGS      := $(COMMON_FLAGS)
 OBJCFLAGS   := $(COMMON_FLAGS) -fno-objc-arc
 LDFLAGS     := $(ARCH_FLAGS) \
+               -fstack-protector \
                -Wl,-dead_strip \
                -framework Foundation \
                -framework UIKit \
@@ -40,6 +42,7 @@ LDFLAGS     := $(ARCH_FLAGS) \
                -framework QuartzCore \
                -framework AVFoundation \
                -framework AudioToolbox \
+               -framework Security \
                -lz -lpthread -lobjc
 
 C_SRCS      := src/el_fmp4_adts.c $(CJSON_DIR)/cJSON.c

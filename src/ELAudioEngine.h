@@ -48,6 +48,7 @@ typedef enum {
     BOOL _streamPaused;
 
     NSTimer *_progressTimer;
+    BOOL _isBackgrounded;
     UIBackgroundTaskIdentifier _bgTask;
     BOOL _resumeAfterInterruption;
 

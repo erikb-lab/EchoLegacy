@@ -37,6 +37,7 @@ typedef enum {
 + (ELAuthManager *)sharedManager;
 
 @property (nonatomic, readonly) BOOL isSignedIn;
+@property (nonatomic, readonly) BOOL hasConfiguredClientId;
 @property (nonatomic, copy, readonly) NSString *accountName;
 @property (nonatomic, copy, readonly) NSString *accountAvatarURL;
 @property (nonatomic, copy) NSString *clientId;

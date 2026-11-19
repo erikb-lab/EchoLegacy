@@ -65,17 +65,22 @@ static NSString *el_resize_google_thumb(NSString *url, int size) {
         url = [url stringByReplacingOccurrencesOfString:@"/vi_webp/" withString:@"/vi/"];
         url = [url stringByReplacingOccurrencesOfString:@".webp" withString:@".jpg"];
     }
+    NSString *outURL = url;
     NSRange eq = [url rangeOfString:@"=w" options:NSBackwardsSearch];
     if (eq.location != NSNotFound) {
         NSString *prefix = [url substringToIndex:eq.location];
-        return [NSString stringWithFormat:@"%@=w%d-h%d-l90-rj", prefix, size, size];
+        outURL = [NSString stringWithFormat:@"%@=w%d-h%d-l90-rj", prefix, size, size];
+    } else {
+        NSRange sq = [url rangeOfString:@"=s" options:NSBackwardsSearch];
+        if (sq.location != NSNotFound) {
+            NSString *prefix = [url substringToIndex:sq.location];
+            outURL = [NSString stringWithFormat:@"%@=s%d-c-rj", prefix, size];
+        }
     }
-    NSRange sq = [url rangeOfString:@"=s" options:NSBackwardsSearch];
-    if (sq.location != NSNotFound) {
-        NSString *prefix = [url substringToIndex:sq.location];
-        return [NSString stringWithFormat:@"%@=s%d-c-rj", prefix, size];
+    if (!ELValidateHTTPSURL(outURL, ELHostCategoryThumbnail, NULL, NULL, NULL)) {
+        return @"";
     }
-    return url;
+    return outURL;
 }
 
 static NSString *el_text_from_yt_obj(id obj) {
@@ -162,7 +167,7 @@ static ELTrack *el_parse_music_list_item(NSDictionary *renderer) {
         }
     }
 
-    if ([videoId length] == 0 || [title length] == 0) return nil;
+    if (!el_is_valid_video_id(videoId) || [title length] == 0) return nil;
 
     if ([flexCols count] > 1) {
         NSDictionary *c1 = [ELJSON dict:[flexCols objectAtIndex:1] forKey:@"musicResponsiveListItemFlexColumnRenderer"];
@@ -234,7 +239,7 @@ static ELTrack *el_parse_tile_video(NSDictionary *tile) {
         NSDictionary *we = [ELJSON dict:cmd forKey:@"watchEndpoint"];
         videoId = [ELJSON string:we forKey:@"videoId"];
     }
-    if ([videoId length] == 0) return nil;
+    if (!el_is_valid_video_id(videoId)) return nil;
 
     NSDictionary *meta = [ELJSON dict:[ELJSON dict:tile forKey:@"metadata"] forKey:@"tileMetadataRenderer"];
     NSString *title = el_text_from_yt_obj([meta objectForKey:@"title"]);
@@ -295,7 +300,7 @@ static ELTrack *el_parse_music_two_row_item(NSDictionary *renderer) {
         NSDictionary *pWatch = [ELJSON dict:pNav forKey:@"watchEndpoint"];
         videoId = [ELJSON string:pWatch forKey:@"videoId"];
     }
-    if ([videoId length] == 0) return nil;
+    if (!el_is_valid_video_id(videoId)) return nil;
 
     NSString *title = el_text_from_yt_obj([renderer objectForKey:@"title"]);
     if ([title length] == 0) return nil;
@@ -340,7 +345,7 @@ static ELTrack *el_parse_playlist_panel_video(NSDictionary *renderer) {
         NSDictionary *watch = [ELJSON dict:nav forKey:@"watchEndpoint"];
         videoId = [ELJSON string:watch forKey:@"videoId"];
     }
-    if ([videoId length] == 0) return nil;
+    if (!el_is_valid_video_id(videoId)) return nil;
 
     NSString *title = el_text_from_yt_obj([renderer objectForKey:@"title"]);
     if ([title length] == 0) return nil;
@@ -375,7 +380,10 @@ static ELTrack *el_parse_playlist_panel_video(NSDictionary *renderer) {
     return track;
 }
 
-static void el_collect_tracks_recursive(id node, NSMutableArray *outTracks, NSMutableSet *seenIds) {
+#define EL_YT_MAX_WALK_DEPTH 64
+
+static void el_collect_tracks_recursive(id node, NSMutableArray *outTracks, NSMutableSet *seenIds, int depth) {
+    if (depth > EL_YT_MAX_WALK_DEPTH) return;
     if ([node isKindOfClass:[NSDictionary class]]) {
         NSDictionary *dict = (NSDictionary *)node;
         NSDictionary *renderer = [ELJSON dict:dict forKey:@"musicResponsiveListItemRenderer"];
@@ -415,16 +423,17 @@ static void el_collect_tracks_recursive(id node, NSMutableArray *outTracks, NSMu
             return;
         }
         for (id key in dict) {
-            el_collect_tracks_recursive([dict objectForKey:key], outTracks, seenIds);
+            el_collect_tracks_recursive([dict objectForKey:key], outTracks, seenIds, depth + 1);
         }
     } else if ([node isKindOfClass:[NSArray class]]) {
         for (id child in (NSArray *)node) {
-            el_collect_tracks_recursive(child, outTracks, seenIds);
+            el_collect_tracks_recursive(child, outTracks, seenIds, depth + 1);
         }
     }
 }
 
-static NSString *el_extract_continuation_token(id node) {
+static NSString *el_extract_continuation_token(id node, int depth) {
+    if (depth > EL_YT_MAX_WALK_DEPTH) return nil;
     if ([node isKindOfClass:[NSDictionary class]]) {
         NSDictionary *dict = (NSDictionary *)node;
         NSArray *conts = [ELJSON array:dict forKey:@"continuations"];
@@ -444,19 +453,20 @@ static NSString *el_extract_continuation_token(id node) {
             if ([tok length] > 0) return tok;
         }
         for (id key in dict) {
-            NSString *found = el_extract_continuation_token([dict objectForKey:key]);
+            NSString *found = el_extract_continuation_token([dict objectForKey:key], depth + 1);
             if ([found length] > 0) return found;
         }
     } else if ([node isKindOfClass:[NSArray class]]) {
         for (id child in (NSArray *)node) {
-            NSString *found = el_extract_continuation_token(child);
+            NSString *found = el_extract_continuation_token(child, depth + 1);
             if ([found length] > 0) return found;
         }
     }
     return nil;
 }
 
-static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists, NSMutableSet *seenIds) {
+static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists, NSMutableSet *seenIds, int depth) {
+    if (depth > EL_YT_MAX_WALK_DEPTH) return;
     if ([node isKindOfClass:[NSDictionary class]]) {
         NSDictionary *dict = (NSDictionary *)node;
         NSDictionary *tile = [ELJSON dict:dict forKey:@"tileRenderer"];
@@ -527,11 +537,11 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
             return;
         }
         for (id key in dict) {
-            el_collect_playlists_recursive([dict objectForKey:key], outPlaylists, seenIds);
+            el_collect_playlists_recursive([dict objectForKey:key], outPlaylists, seenIds, depth + 1);
         }
     } else if ([node isKindOfClass:[NSArray class]]) {
         for (id child in (NSArray *)node) {
-            el_collect_playlists_recursive(child, outPlaylists, seenIds);
+            el_collect_playlists_recursive(child, outPlaylists, seenIds, depth + 1);
         }
     }
 }
@@ -728,7 +738,7 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
 
     NSMutableArray *tracks = [NSMutableArray array];
     NSMutableSet *seen = [NSMutableSet set];
-    el_collect_tracks_recursive(json, tracks, seen);
+    el_collect_tracks_recursive(json, tracks, seen, 0);
     return tracks;
 }
 
@@ -754,7 +764,7 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
     NSMutableArray *tracks = [NSMutableArray array];
     if (json) {
         NSMutableSet *seen = [NSMutableSet set];
-        el_collect_tracks_recursive(json, tracks, seen);
+        el_collect_tracks_recursive(json, tracks, seen, 0);
     }
     if ([tracks count] == 0) {
         NSString *fbErr = nil;
@@ -767,7 +777,7 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
 }
 
 - (NSArray *)fetchRadioTracksForVideoId:(NSString *)videoId error:(NSString **)outError {
-    if ([videoId length] == 0) {
+    if (!el_is_valid_video_id(videoId)) {
         if (outError) *outError = @"Invalid videoId";
         return nil;
     }
@@ -789,7 +799,7 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
     NSMutableArray *tracks = [NSMutableArray array];
     if (json) {
         NSMutableSet *seen = [NSMutableSet set];
-        el_collect_tracks_recursive(json, tracks, seen);
+        el_collect_tracks_recursive(json, tracks, seen, 0);
     }
 
     if ([tracks count] == 0) {
@@ -855,7 +865,7 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
 #define EL_STREAM_INFO_TTL_SEC   1500.0
 
 - (void)invalidateCachedStreamForVideoId:(NSString *)videoId {
-    if ([videoId length] == 0) return;
+    if (!el_is_valid_video_id(videoId)) return;
     @synchronized(self) {
         [_streamInfoCache removeObjectForKey:videoId];
         [_streamInfoLRU removeObject:videoId];
@@ -863,8 +873,8 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
 }
 
 - (ELStreamInfo *)resolveAudioStreamForVideoId:(NSString *)videoId error:(NSString **)outError {
-    if ([videoId length] == 0) {
-        if (outError) *outError = @"Missing videoId";
+    if (!el_is_valid_video_id(videoId)) {
+        if (outError) *outError = @"Invalid videoId";
         return nil;
     }
 
@@ -939,13 +949,13 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
     NSArray *adaptive = [ELJSON array:streamingData forKey:@"adaptiveFormats"];
 
     NSDictionary *chosen = nil;
-    /* Prefer itag 140 (128kbps AAC-LC), fallback to any audio/mp4 (e.g. itag 139) */
+    /* Prefer itag 140 (128kbps AAC-LC), fallback to any audio/mp4 (e.g. itag 139) on *.googlevideo.com */
     for (id fmtObj in adaptive) {
         if (![fmtObj isKindOfClass:[NSDictionary class]]) continue;
         NSString *url = [ELJSON string:fmtObj forKey:@"url"];
         NSString *mime = [ELJSON string:fmtObj forKey:@"mimeType"];
         NSInteger itag = [[ELJSON number:fmtObj forKey:@"itag"] integerValue];
-        if ([url length] == 0) continue;
+        if (!ELValidateHTTPSURL(url, ELHostCategoryMediaStream, NULL, NULL, NULL)) continue;
         if (itag == 140) {
             chosen = fmtObj;
             break;
@@ -1067,9 +1077,9 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
 
     NSMutableArray *pageTracks = [NSMutableArray array];
     NSMutableSet *pageSeenIds = [NSMutableSet set];
-    el_collect_tracks_recursive(json, pageTracks, pageSeenIds);
+    el_collect_tracks_recursive(json, pageTracks, pageSeenIds, 0);
 
-    NSString *nextTok = el_extract_continuation_token(json);
+    NSString *nextTok = el_extract_continuation_token(json, 0);
     if (outNextToken && [nextTok length] > 0) {
         *outNextToken = nextTok;
     }
@@ -1160,8 +1170,8 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
         }
         anyPlPageOK = YES;
         NSUInteger beforeCount = [playlists count];
-        el_collect_playlists_recursive(plJson, playlists, seenPl);
-        NSString *nextTok = el_extract_continuation_token(plJson);
+        el_collect_playlists_recursive(plJson, playlists, seenPl, 0);
+        NSString *nextTok = el_extract_continuation_token(plJson, 0);
         if ([nextTok length] == 0 || [seenPlTokens containsObject:nextTok] || [playlists count] == beforeCount) {
             [pool release];
             break;
@@ -1192,7 +1202,7 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
 }
 
 - (BOOL)isTrackLiked:(NSString *)videoId {
-    if ([videoId length] == 0) return NO;
+    if (!el_is_valid_video_id(videoId)) return NO;
     @synchronized(self) {
         for (ELTrack *t in _cachedLikedSongs) {
             if ([t.videoId isEqualToString:videoId]) return YES;
@@ -1202,7 +1212,7 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
 }
 
 - (BOOL)setLiked:(BOOL)liked forTrack:(ELTrack *)track error:(NSString **)outError {
-    if (!track || [track.videoId length] == 0) {
+    if (!track || !el_is_valid_video_id(track.videoId)) {
         if (outError) *outError = @"Invalid track";
         return NO;
     }

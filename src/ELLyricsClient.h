@@ -14,6 +14,8 @@
 }
 
 + (ELLyricsClient *)sharedClient;
++ (BOOL)isOnlineLyricsEnabled;
++ (void)setOnlineLyricsEnabled:(BOOL)enabled;
 
 - (NSString *)lyricsFilePathForVideoId:(NSString *)videoId;
 - (NSArray *)cachedLyricsForVideoId:(NSString *)videoId;

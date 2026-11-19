@@ -90,6 +90,21 @@
     _toastLabel.userInteractionEnabled = NO;
     [_window addSubview:_toastLabel];
 
+    /* Opaque full-screen privacy shield to prevent iOS app-switcher snapshots from capturing OAuth codes */
+    _privacyShieldView = [[UIView alloc] initWithFrame:bounds];
+    _privacyShieldView.backgroundColor = [ELTheme backgroundColor];
+    _privacyShieldView.opaque = YES;
+    _privacyShieldView.hidden = YES;
+    _privacyShieldView.userInteractionEnabled = NO;
+    UILabel *shieldTitle = [[[UILabel alloc] initWithFrame:CGRectMake(20.0f, 210.0f, 280.0f, 40.0f)] autorelease];
+    shieldTitle.backgroundColor = [UIColor clearColor];
+    shieldTitle.font = [UIFont boldSystemFontOfSize:24.0f];
+    shieldTitle.textColor = [ELTheme textPrimaryColor];
+    shieldTitle.textAlignment = UITextAlignmentCenter;
+    shieldTitle.text = @"EchoLegacy";
+    [_privacyShieldView addSubview:shieldTitle];
+    [_window addSubview:_privacyShieldView];
+
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(onToastNotification:)
                                                  name:ELPlayerToastNotification
@@ -139,16 +154,39 @@
     [_tabBarController presentModalViewController:np animated:YES];
 }
 
+- (void)showPrivacyShield {
+    if (!_privacyShieldView) return;
+    [_window bringSubviewToFront:_privacyShieldView];
+    _privacyShieldView.hidden = NO;
+}
+
+- (void)hidePrivacyShield {
+    if (!_privacyShieldView) return;
+    _privacyShieldView.hidden = YES;
+}
+
+- (void)applicationWillResignActive:(UIApplication *)application {
+    (void)application;
+    [self showPrivacyShield];
+}
+
 - (void)applicationDidBecomeActive:(UIApplication *)application {
+    [self hidePrivacyShield];
     [application beginReceivingRemoteControlEvents];
     [_window becomeFirstResponder];
 }
 
 - (void)applicationDidEnterBackground:(UIApplication *)application {
+    [self showPrivacyShield];
     [application beginReceivingRemoteControlEvents];
     [_window becomeFirstResponder];
     /* RAM optimization: flush decoded album art bitmaps while backgrounded (disk cache stays intact) */
     [[ELImageCache sharedCache] clearMemoryCache];
+}
+
+- (void)applicationWillEnterForeground:(UIApplication *)application {
+    (void)application;
+    [self hidePrivacyShield];
 }
 
 - (void)applicationDidReceiveMemoryWarning:(UIApplication *)application {
@@ -165,6 +203,7 @@
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [_toastTimer invalidate];
     [_toastTimer release];
+    [_privacyShieldView release];
     [_toastLabel release];
     [_miniPlayerBar release];
     [_tabBarController release];

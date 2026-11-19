@@ -178,14 +178,19 @@ static CGFloat el_clampf(CGFloat v, CGFloat lo, CGFloat hi) {
 + (UIColor *)dominantBackdropColorFromImage:(UIImage *)image cacheKey:(NSString *)cacheKey {
     static NSMutableDictionary *g_backdrop_cache = nil;
     if ([cacheKey length] > 0) {
-        if (!g_backdrop_cache) g_backdrop_cache = [[NSMutableDictionary alloc] init];
-        UIColor *hit = [g_backdrop_cache objectForKey:cacheKey];
-        if (hit) return hit;
+        @synchronized(self) {
+            if (!g_backdrop_cache) g_backdrop_cache = [[NSMutableDictionary alloc] init];
+            UIColor *hit = [g_backdrop_cache objectForKey:cacheKey];
+            if (hit) return [[hit retain] autorelease];
+        }
     }
     UIColor *col = [self dominantBackdropColorFromImage:image];
     if (col && [cacheKey length] > 0 && image && image != [self placeholderArtImage]) {
-        if ([g_backdrop_cache count] > 32) [g_backdrop_cache removeAllObjects];
-        [g_backdrop_cache setObject:col forKey:cacheKey];
+        @synchronized(self) {
+            if (!g_backdrop_cache) g_backdrop_cache = [[NSMutableDictionary alloc] init];
+            if ([g_backdrop_cache count] > 32) [g_backdrop_cache removeAllObjects];
+            [g_backdrop_cache setObject:col forKey:cacheKey];
+        }
     }
     return col;
 }
@@ -387,28 +392,47 @@ static CGFloat el_clampf(CGFloat v, CGFloat lo, CGFloat hi) {
 + (UIImage *)placeholderArtImage {
     UIImage *c = el_cached_icon(@"placeholder_art");
     if (c) return c;
-    CGSize sz = CGSizeMake(96.0f, 96.0f);
-    UIGraphicsBeginImageContext(sz);
-    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    const size_t px = 96;
+    const CGFloat fSize = 96.0f;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    if (!cs) return nil;
+    CGContextRef ctx = CGBitmapContextCreate(NULL,
+                                             px,
+                                             px,
+                                             8,
+                                             px * 4,
+                                             cs,
+                                             kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Host);
+    CGColorSpaceRelease(cs);
+    if (!ctx) return nil;
 
-    [[self surfaceColor] setFill];
-    CGContextFillRect(ctx, CGRectMake(0, 0, sz.width, sz.height));
+    /* Flip to top-left UIKit coordinates so note geometry renders identically on any thread */
+    CGContextTranslateCTM(ctx, 0.0f, fSize);
+    CGContextScaleCTM(ctx, 1.0f, -1.0f);
 
-    [[UIColor colorWithRed:0.32f green:0.32f blue:0.42f alpha:1.0f] setFill];
-    CGContextFillEllipseInRect(ctx, CGRectMake(26, 58, 16, 12));
-    CGContextFillEllipseInRect(ctx, CGRectMake(54, 52, 16, 12));
-    CGContextFillRect(ctx, CGRectMake(39, 28, 4, 34));
-    CGContextFillRect(ctx, CGRectMake(67, 22, 4, 34));
+    CGContextSetRGBFillColor(ctx, 0.106f, 0.106f, 0.145f, 1.0f);
+    CGContextFillRect(ctx, CGRectMake(0.0f, 0.0f, fSize, fSize));
+
+    CGContextSetRGBFillColor(ctx, 0.32f, 0.32f, 0.42f, 1.0f);
+    CGContextFillEllipseInRect(ctx, CGRectMake(26.0f, 58.0f, 16.0f, 12.0f));
+    CGContextFillEllipseInRect(ctx, CGRectMake(54.0f, 52.0f, 16.0f, 12.0f));
+    CGContextFillRect(ctx, CGRectMake(39.0f, 28.0f, 4.0f, 34.0f));
+    CGContextFillRect(ctx, CGRectMake(67.0f, 22.0f, 4.0f, 34.0f));
     CGContextBeginPath(ctx);
-    CGContextMoveToPoint(ctx, 39, 28);
-    CGContextAddLineToPoint(ctx, 71, 22);
-    CGContextAddLineToPoint(ctx, 71, 30);
-    CGContextAddLineToPoint(ctx, 39, 36);
+    CGContextMoveToPoint(ctx, 39.0f, 28.0f);
+    CGContextAddLineToPoint(ctx, 71.0f, 22.0f);
+    CGContextAddLineToPoint(ctx, 71.0f, 30.0f);
+    CGContextAddLineToPoint(ctx, 39.0f, 36.0f);
     CGContextClosePath(ctx);
     CGContextFillPath(ctx);
 
-    UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
-    UIGraphicsEndImageContext();
+    CGImageRef cgOut = CGBitmapContextCreateImage(ctx);
+    CGContextRelease(ctx);
+    UIImage *img = nil;
+    if (cgOut) {
+        img = [UIImage imageWithCGImage:cgOut];
+        CGImageRelease(cgOut);
+    }
     return el_store_icon(@"placeholder_art", img);
 }
 
@@ -1027,6 +1051,8 @@ static CGFloat el_clampf(CGFloat v, CGFloat lo, CGFloat hi) {
 }
 
 + (UIImage *)roundedPlaceholderArtSize:(CGFloat)size radius:(CGFloat)radius {
+    if (size <= 0.0f) size = 44.0f;
+    if (size > 512.0f) size = 512.0f;
     NSString *k = [NSString stringWithFormat:@"rph_%d_%d", (int)(size + 0.5f), (int)(radius + 0.5f)];
     UIImage *c = el_cached_icon(k);
     if (c) return c;
@@ -1034,6 +1060,7 @@ static CGFloat el_clampf(CGFloat v, CGFloat lo, CGFloat hi) {
     CGImageRef cgImg = [base CGImage];
     size_t px = (size_t)(size + 0.5f);
     if (px == 0) px = 1;
+    if (px > 512) px = 512;
     CGFloat fSize = (CGFloat)px;
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
     if (!cs || !cgImg) {
@@ -1103,6 +1130,7 @@ static CGFloat el_clampf(CGFloat v, CGFloat lo, CGFloat hi) {
 
     size_t px = (size_t)(size + 0.5f);
     if (px == 0) px = 1;
+    if (px > 512) px = 512;
     CGFloat fSize = (CGFloat)px;
 
     /* Aspect-fill center crop + rounded clip in one pure CoreGraphics pass (100% thread-safe on any worker thread) */

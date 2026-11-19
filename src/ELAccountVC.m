@@ -1,10 +1,13 @@
 #import "ELAccountVC.h"
 #import "ELAudioEngine.h"
 #import "ELAuthManager.h"
+#import "ELHTTPClient.h"
 #import "ELImageCache.h"
 #import "ELTheme.h"
 #import "ELUpdater.h"
 #import "ELYouTubeClient.h"
+
+static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
 
 @implementation ELAccountVC
 
@@ -19,27 +22,50 @@
     return self;
 }
 
-- (void)dealloc {
+- (void)invalidateCodeMaskTimer {
+    [_codeMaskTimer invalidate];
+    [_codeMaskTimer release];
+    _codeMaskTimer = nil;
+}
+
+- (void)releaseViewOutlets {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [self invalidateCodeMaskTimer];
+    [_scrollView release]; _scrollView = nil;
+    [_statusDot release]; _statusDot = nil;
+    [_accountTitleLabel release]; _accountTitleLabel = nil;
+    [_accountSubLabel release]; _accountSubLabel = nil;
+    [_primaryBtn release]; _primaryBtn = nil;
+    [_secondaryBtn release]; _secondaryBtn = nil;
+    [_oauthCard release]; _oauthCard = nil;
+    [_clientIdField release]; _clientIdField = nil;
+    [_clientSecretField release]; _clientSecretField = nil;
+    [_saveOAuthBtn release]; _saveOAuthBtn = nil;
+    [_codeCard release]; _codeCard = nil;
+    [_codeHintLabel release]; _codeHintLabel = nil;
+    [_codeValueLabel release]; _codeValueLabel = nil;
+    [_codeRevealBtn release]; _codeRevealBtn = nil;
+    [_codePollLabel release]; _codePollLabel = nil;
+    [_spinner release]; _spinner = nil;
+    [_prefsCard release]; _prefsCard = nil;
+    [_shakeSwitch release]; _shakeSwitch = nil;
+    [_lyricsSwitch release]; _lyricsSwitch = nil;
+    [_cacheLabel release]; _cacheLabel = nil;
+    [_clearCacheBtn release]; _clearCacheBtn = nil;
+    [_updateCard release]; _updateCard = nil;
+    [_updateStatusLabel release]; _updateStatusLabel = nil;
+    [_updateBtn release]; _updateBtn = nil;
+}
+
+- (void)viewDidUnload {
+    [self releaseViewOutlets];
+    [super viewDidUnload];
+}
+
+- (void)dealloc {
     _pollSession++;
-    [_scrollView release];
-    [_statusDot release];
-    [_accountTitleLabel release];
-    [_accountSubLabel release];
-    [_primaryBtn release];
-    [_secondaryBtn release];
-    [_codeCard release];
-    [_codeHintLabel release];
-    [_codeValueLabel release];
-    [_codePollLabel release];
-    [_spinner release];
-    [_prefsCard release];
-    [_shakeSwitch release];
-    [_cacheLabel release];
-    [_clearCacheBtn release];
-    [_updateCard release];
-    [_updateStatusLabel release];
-    [_updateBtn release];
+    [self releaseViewOutlets];
+    [_currentUserCode release];
     [_pendingUpdate release];
     [super dealloc];
 }
@@ -51,7 +77,7 @@
 
     _scrollView = [[UIScrollView alloc] initWithFrame:self.view.bounds];
     _scrollView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    _scrollView.contentSize = CGSizeMake(320, 490);
+    _scrollView.contentSize = CGSizeMake(320, 560);
     _scrollView.indicatorStyle = UIScrollViewIndicatorStyleWhite;
     [self.view addSubview:_scrollView];
 
@@ -86,24 +112,75 @@
     [_primaryBtn addTarget:self action:@selector(onPrimaryTapped) forControlEvents:UIControlEventTouchUpInside];
     [card addSubview:_primaryBtn];
 
-    /* Secondary Action Button (Sign Out) */
-    _secondaryBtn = [[ELTheme pillButtonWithTitle:@"Sign Out"
+    /* Secondary Action Button (Sign Out when signed in, Configure OAuth Client when signed out) */
+    _secondaryBtn = [[ELTheme pillButtonWithTitle:@"Configure OAuth Client"
                                             color:[ELTheme surfaceHighlightColor]
                                             frame:CGRectMake(16, 174, 288, 36)] retain];
     [_secondaryBtn addTarget:self action:@selector(onSecondaryTapped) forControlEvents:UIControlEventTouchUpInside];
     [_scrollView addSubview:_secondaryBtn];
 
-    /* Device OAuth Code Card (shown during sign-in) */
-    _codeCard = [[UIView alloc] initWithFrame:CGRectMake(16, 174, 288, 160)];
+    /* User-Supplied OAuth Client ID & Secret Configuration Card (Flaw #3) */
+    _oauthCard = [[UIView alloc] initWithFrame:CGRectMake(16, 218, 288, 162)];
+    _oauthCard.backgroundColor = [ELTheme surfaceColor];
+    _oauthCard.layer.cornerRadius = 12.0f;
+    _oauthCard.layer.masksToBounds = YES;
+    _oauthCard.hidden = YES;
+    [_scrollView addSubview:_oauthCard];
+
+    UILabel *oaTitle = [[[UILabel alloc] initWithFrame:CGRectMake(14, 10, 260, 16)] autorelease];
+    oaTitle.backgroundColor = [UIColor clearColor];
+    oaTitle.font = [UIFont boldSystemFontOfSize:11.0f];
+    oaTitle.textColor = [ELTheme textSecondaryColor];
+    oaTitle.text = @"GOOGLE OAUTH CLIENT (TV / DEVICE FLOW)";
+    [_oauthCard addSubview:oaTitle];
+
+    _clientIdField = [[UITextField alloc] initWithFrame:CGRectMake(14, 32, 260, 32)];
+    _clientIdField.backgroundColor = [ELTheme backgroundColor];
+    _clientIdField.textColor = [ELTheme textPrimaryColor];
+    _clientIdField.font = [UIFont systemFontOfSize:12.0f];
+    _clientIdField.placeholder = @"Client ID (.apps.googleusercontent.com)";
+    _clientIdField.contentVerticalAlignment = UIControlContentVerticalAlignmentCenter;
+    _clientIdField.borderStyle = UITextBorderStyleRoundedRect;
+    _clientIdField.clearButtonMode = UITextFieldViewModeWhileEditing;
+    _clientIdField.autocorrectionType = UITextAutocorrectionTypeNo;
+    _clientIdField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    _clientIdField.returnKeyType = UIReturnKeyDone;
+    _clientIdField.delegate = self;
+    [_oauthCard addSubview:_clientIdField];
+
+    _clientSecretField = [[UITextField alloc] initWithFrame:CGRectMake(14, 72, 260, 32)];
+    _clientSecretField.backgroundColor = [ELTheme backgroundColor];
+    _clientSecretField.textColor = [ELTheme textPrimaryColor];
+    _clientSecretField.font = [UIFont systemFontOfSize:12.0f];
+    _clientSecretField.placeholder = @"Client Secret (optional, Keychain)";
+    _clientSecretField.contentVerticalAlignment = UIControlContentVerticalAlignmentCenter;
+    _clientSecretField.borderStyle = UITextBorderStyleRoundedRect;
+    _clientSecretField.clearButtonMode = UITextFieldViewModeWhileEditing;
+    _clientSecretField.secureTextEntry = YES;
+    _clientSecretField.autocorrectionType = UITextAutocorrectionTypeNo;
+    _clientSecretField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    _clientSecretField.returnKeyType = UIReturnKeyDone;
+    _clientSecretField.delegate = self;
+    [_oauthCard addSubview:_clientSecretField];
+
+    _saveOAuthBtn = [[ELTheme pillButtonWithTitle:@"Save OAuth Credentials"
+                                            color:[ELTheme accentColor]
+                                            frame:CGRectMake(14, 114, 260, 34)] retain];
+    _saveOAuthBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13.0f];
+    [_saveOAuthBtn addTarget:self action:@selector(onSaveOAuthTapped) forControlEvents:UIControlEventTouchUpInside];
+    [_oauthCard addSubview:_saveOAuthBtn];
+
+    /* Device OAuth Code Card (shown during sign-in, masked by default - Flaw #22) */
+    _codeCard = [[UIView alloc] initWithFrame:CGRectMake(16, 218, 288, 160)];
     _codeCard.backgroundColor = [ELTheme surfaceColor];
     _codeCard.layer.cornerRadius = 12.0f;
     _codeCard.layer.masksToBounds = YES;
     _codeCard.hidden = YES;
     [_scrollView addSubview:_codeCard];
 
-    _codeHintLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 12, 260, 36)];
+    _codeHintLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 10, 260, 38)];
     _codeHintLabel.backgroundColor = [UIColor clearColor];
-    _codeHintLabel.font = [UIFont systemFontOfSize:12.0f];
+    _codeHintLabel.font = [UIFont systemFontOfSize:11.0f];
     _codeHintLabel.textColor = [ELTheme textSecondaryColor];
     _codeHintLabel.textAlignment = UITextAlignmentCenter;
     _codeHintLabel.numberOfLines = 2;
@@ -113,10 +190,15 @@
     _codeValueLabel.backgroundColor = [ELTheme backgroundColor];
     _codeValueLabel.layer.cornerRadius = 8.0f;
     _codeValueLabel.layer.masksToBounds = YES;
-    _codeValueLabel.font = [UIFont boldSystemFontOfSize:24.0f];
+    _codeValueLabel.font = [UIFont boldSystemFontOfSize:20.0f];
     _codeValueLabel.textColor = [ELTheme textPrimaryColor];
     _codeValueLabel.textAlignment = UITextAlignmentCenter;
     [_codeCard addSubview:_codeValueLabel];
+
+    _codeRevealBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
+    _codeRevealBtn.frame = _codeValueLabel.frame;
+    [_codeRevealBtn addTarget:self action:@selector(onCodeRevealTapped) forControlEvents:UIControlEventTouchUpInside];
+    [_codeCard addSubview:_codeRevealBtn];
 
     _spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleWhite];
     _spinner.frame = CGRectMake(22, 114, 20, 20);
@@ -127,10 +209,11 @@
     _codePollLabel.backgroundColor = [UIColor clearColor];
     _codePollLabel.font = [UIFont systemFontOfSize:12.0f];
     _codePollLabel.textColor = [ELTheme textSecondaryColor];
+    _codePollLabel.numberOfLines = 2;
     [_codeCard addSubview:_codePollLabel];
 
-    /* 2. Playback & Storage Preferences Card */
-    _prefsCard = [[UIView alloc] initWithFrame:CGRectMake(16, 224, 288, 134)];
+    /* 2. Playback, Privacy & Storage Preferences Card (Flaw #9) */
+    _prefsCard = [[UIView alloc] initWithFrame:CGRectMake(16, 224, 288, 192)];
     _prefsCard.backgroundColor = [ELTheme surfaceColor];
     _prefsCard.layer.cornerRadius = 12.0f;
     _prefsCard.layer.masksToBounds = YES;
@@ -140,7 +223,7 @@
     pTitle.backgroundColor = [UIColor clearColor];
     pTitle.font = [UIFont boldSystemFontOfSize:12.0f];
     pTitle.textColor = [ELTheme textSecondaryColor];
-    pTitle.text = @"PLAYBACK & MEMORY";
+    pTitle.text = @"PLAYBACK, PRIVACY & STORAGE";
     [_prefsCard addSubview:pTitle];
 
     UILabel *shakeLbl = [[[UILabel alloc] initWithFrame:CGRectMake(16, 40, 165, 24)] autorelease];
@@ -155,11 +238,34 @@
     [_shakeSwitch addTarget:self action:@selector(onShakeToggled) forControlEvents:UIControlEventValueChanged];
     [_prefsCard addSubview:_shakeSwitch];
 
-    UIView *div = [[[UIView alloc] initWithFrame:CGRectMake(16, 76, 256, 1)] autorelease];
-    div.backgroundColor = [ELTheme separatorColor];
-    [_prefsCard addSubview:div];
+    UIView *div1 = [[[UIView alloc] initWithFrame:CGRectMake(16, 74, 256, 1)] autorelease];
+    div1.backgroundColor = [ELTheme separatorColor];
+    [_prefsCard addSubview:div1];
 
-    _cacheLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 89, 152, 32)];
+    UILabel *lyricsLbl = [[[UILabel alloc] initWithFrame:CGRectMake(16, 82, 165, 18)] autorelease];
+    lyricsLbl.backgroundColor = [UIColor clearColor];
+    lyricsLbl.font = [UIFont boldSystemFontOfSize:13.0f];
+    lyricsLbl.textColor = [ELTheme textPrimaryColor];
+    lyricsLbl.text = @"Online Lyrics";
+    [_prefsCard addSubview:lyricsLbl];
+
+    UILabel *lyricsSub = [[[UILabel alloc] initWithFrame:CGRectMake(16, 100, 165, 16)] autorelease];
+    lyricsSub.backgroundColor = [UIColor clearColor];
+    lyricsSub.font = [UIFont systemFontOfSize:10.0f];
+    lyricsSub.textColor = [ELTheme textSecondaryColor];
+    lyricsSub.text = @"Query lrclib.net for track lyrics";
+    [_prefsCard addSubview:lyricsSub];
+
+    _lyricsSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(184, 86, 94, 27)];
+    _lyricsSwitch.on = [[NSUserDefaults standardUserDefaults] boolForKey:kOnlineLyricsDefaultsKey];
+    [_lyricsSwitch addTarget:self action:@selector(onLyricsToggled) forControlEvents:UIControlEventValueChanged];
+    [_prefsCard addSubview:_lyricsSwitch];
+
+    UIView *div2 = [[[UIView alloc] initWithFrame:CGRectMake(16, 128, 256, 1)] autorelease];
+    div2.backgroundColor = [ELTheme separatorColor];
+    [_prefsCard addSubview:div2];
+
+    _cacheLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 141, 152, 34)];
     _cacheLabel.backgroundColor = [UIColor clearColor];
     _cacheLabel.font = [UIFont systemFontOfSize:12.0f];
     _cacheLabel.textColor = [ELTheme textSecondaryColor];
@@ -168,13 +274,13 @@
 
     _clearCacheBtn = [[ELTheme pillButtonWithTitle:@"Clear Cache"
                                              color:[ELTheme surfaceHighlightColor]
-                                             frame:CGRectMake(174, 88, 98, 32)] retain];
+                                             frame:CGRectMake(174, 142, 98, 32)] retain];
     _clearCacheBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12.0f];
     [_clearCacheBtn addTarget:self action:@selector(onClearCacheTapped) forControlEvents:UIControlEventTouchUpInside];
     [_prefsCard addSubview:_clearCacheBtn];
 
     /* 3. GitHub Updates Card */
-    _updateCard = [[UIView alloc] initWithFrame:CGRectMake(16, 368, 288, 122)];
+    _updateCard = [[UIView alloc] initWithFrame:CGRectMake(16, 428, 288, 122)];
     _updateCard.backgroundColor = [ELTheme surfaceColor];
     _updateCard.layer.cornerRadius = 12.0f;
     _updateCard.layer.masksToBounds = YES;
@@ -204,18 +310,64 @@
 
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refreshUI) name:ELAuthStateChangedNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refreshUI) name:ELLibraryUpdatedNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(maskUserCodeImmediately) name:UIApplicationWillResignActiveNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(maskUserCodeImmediately) name:UIApplicationDidEnterBackgroundNotification object:nil];
 
+    [self populateOAuthFields];
     [self refreshUI];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+    [self populateOAuthFields];
     [self refreshUI];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [self maskUserCodeImmediately];
+    [_clientIdField resignFirstResponder];
+    [_clientSecretField resignFirstResponder];
+    [super viewWillDisappear:animated];
+}
+
+- (void)populateOAuthFields {
+    ELAuthManager *auth = [ELAuthManager sharedManager];
+    NSString *cid = [auth clientId];
+    _clientIdField.text = ([cid length] > 0) ? cid : @"";
+    _clientSecretField.text = ([[auth clientSecret] length] > 0) ? [auth clientSecret] : @"";
+}
+
+- (BOOL)textFieldShouldReturn:(UITextField *)textField {
+    [textField resignFirstResponder];
+    return YES;
+}
+
+- (void)onSaveOAuthTapped {
+    [_clientIdField resignFirstResponder];
+    [_clientSecretField resignFirstResponder];
+    ELAuthManager *auth = [ELAuthManager sharedManager];
+    [auth setClientId:_clientIdField.text];
+    [auth setClientSecret:_clientSecretField.text];
+    _showingOAuthConfig = NO;
+    [self populateOAuthFields];
+    [self refreshUI];
+    if ([auth hasConfiguredClientId]) {
+        [[ELAudioEngine sharedEngine] postToast:@"Saved OAuth Client credentials"];
+    } else {
+        [[ELAudioEngine sharedEngine] postToast:@"Cleared OAuth Client credentials"];
+    }
 }
 
 - (void)onShakeToggled {
     [[ELAudioEngine sharedEngine] setShakeToShuffleEnabled:_shakeSwitch.on];
     [[ELAudioEngine sharedEngine] postToast:(_shakeSwitch.on ? @"Shake to Shuffle: On" : @"Shake to Shuffle: Off")];
+}
+
+- (void)onLyricsToggled {
+    NSUserDefaults *defs = [NSUserDefaults standardUserDefaults];
+    [defs setBool:_lyricsSwitch.on forKey:kOnlineLyricsDefaultsKey];
+    [defs synchronize];
+    [[ELAudioEngine sharedEngine] postToast:(_lyricsSwitch.on ? @"Online Lyrics: On (lrclib.net)" : @"Online Lyrics: Off (cached only)")];
 }
 
 - (void)onClearCacheTapped {
@@ -224,6 +376,47 @@
     [self refreshUI];
     [[ELAudioEngine sharedEngine] postToast:[NSString stringWithFormat:@"Freed %.1f MB cache", mb]];
 }
+
+#pragma mark - Device Code Masking (Flaw #22)
+
+- (void)updateCodeLabelText {
+    if ([_currentUserCode length] == 0) {
+        _codeValueLabel.text = @"----";
+        _codeValueLabel.font = [UIFont boldSystemFontOfSize:22.0f];
+        return;
+    }
+    if (_codeRevealed) {
+        _codeValueLabel.text = _currentUserCode;
+        _codeValueLabel.font = [UIFont boldSystemFontOfSize:24.0f];
+    } else {
+        _codeValueLabel.text = @"•••• - ••••  (Tap to Reveal)";
+        _codeValueLabel.font = [UIFont boldSystemFontOfSize:16.0f];
+    }
+}
+
+- (void)maskUserCodeImmediately {
+    [self invalidateCodeMaskTimer];
+    _codeRevealed = NO;
+    if (_codeValueLabel) {
+        [self updateCodeLabelText];
+    }
+}
+
+- (void)onCodeRevealTapped {
+    if ([_currentUserCode length] == 0) return;
+    _codeRevealed = !_codeRevealed;
+    [self invalidateCodeMaskTimer];
+    if (_codeRevealed) {
+        _codeMaskTimer = [[NSTimer scheduledTimerWithTimeInterval:15.0
+                                                           target:self
+                                                         selector:@selector(maskUserCodeImmediately)
+                                                         userInfo:nil
+                                                          repeats:NO] retain];
+    }
+    [self updateCodeLabelText];
+}
+
+#pragma mark - GitHub Updates
 
 - (void)onUpdateBtnTapped {
     if (_checkingUpdate || _installingUpdate) return;
@@ -285,7 +478,7 @@
     _installingUpdate = YES;
     _updateBtn.enabled = NO;
     [_updateBtn setTitle:@"Downloading Update..." forState:UIControlStateNormal];
-    _updateStatusLabel.text = @"Downloading signed armv6 build from GitHub...";
+    _updateStatusLabel.text = @"Downloading verified armv6 build from GitHub...";
     [NSThread detachNewThreadSelector:@selector(installUpdateWorker:) toTarget:self withObject:_pendingUpdate];
 }
 
@@ -322,7 +515,7 @@
                                             otherButtonTitles:@"Relaunch", nil] autorelease];
         [av show];
     } else if (ok && ipaPath) {
-        _updateStatusLabel.text = [NSString stringWithFormat:@"Saved IPA to %@", [ipaPath lastPathComponent]];
+        _updateStatusLabel.text = [NSString stringWithFormat:@"Verified IPA saved to %@", [ipaPath lastPathComponent]];
         [_updateBtn setTitle:@"Check for Updates" forState:UIControlStateNormal];
     } else {
         _updateStatusLabel.text = err ? err : @"Update failed.";
@@ -337,64 +530,136 @@
     }
 }
 
+#pragma mark - UI Layout & Account Actions
+
 - (void)refreshUI {
     ELAuthManager *auth = [ELAuthManager sharedManager];
     ELYouTubeClient *yt = [ELYouTubeClient sharedClient];
 
     _shakeSwitch.on = [[ELAudioEngine sharedEngine] shakeToShuffleEnabled];
+    _lyricsSwitch.on = [[NSUserDefaults standardUserDefaults] boolForKey:kOnlineLyricsDefaultsKey];
     double cacheMB = (double)[[ELImageCache sharedCache] diskCacheBytes] / (1024.0 * 1024.0);
     _cacheLabel.text = [NSString stringWithFormat:@"Album Art Cache\n%.1f MB on disk", cacheMB];
 
-    CGFloat prefsY;
+    CGFloat nextY = 222.0f;
     if ([auth isSignedIn]) {
         _statusDot.backgroundColor = [ELTheme successColor];
         NSString *name = [auth accountName];
         _accountTitleLabel.text = ([name length] > 0) ? name : @"Google Account";
         NSUInteger plCount = [[yt cachedPlaylists] count];
         NSUInteger songCount = [[yt cachedLikedSongs] count];
-        _accountSubLabel.text = [NSString stringWithFormat:@"Signed in to YouTube Music\n%lu playlists  •  %lu liked songs synced",
+        _accountSubLabel.text = [NSString stringWithFormat:@"Signed in to YouTube Music (Read-Only)\n%lu playlists  •  %lu liked songs synced",
                                  (unsigned long)plCount, (unsigned long)songCount];
         [_primaryBtn setTitle:(_syncing ? @"Syncing Library..." : @"Sync Library Now") forState:UIControlStateNormal];
         _primaryBtn.enabled = !_syncing;
+        [_secondaryBtn setTitle:@"Sign Out" forState:UIControlStateNormal];
         _secondaryBtn.hidden = NO;
+        _showingOAuthConfig = NO;
+        _oauthCard.hidden = YES;
         _codeCard.hidden = YES;
         [_spinner stopAnimating];
-        prefsY = 224.0f;
+        [self maskUserCodeImmediately];
     } else {
-        _statusDot.backgroundColor = [ELTheme textSecondaryColor];
+        BOOL hasCID = [auth hasConfiguredClientId];
+        _statusDot.backgroundColor = hasCID ? [ELTheme accentColor] : [ELTheme textSecondaryColor];
         _accountTitleLabel.text = @"Not Signed In";
-        _accountSubLabel.text = @"Sign in with Google to sync your YouTube Music playlists and liked songs directly on this iPod.";
-        [_primaryBtn setTitle:@"Sign In with Google" forState:UIControlStateNormal];
+        if (hasCID) {
+            _accountSubLabel.text = @"OAuth Client ID configured. Sign in with Google to sync your YouTube Music playlists and liked songs.";
+        } else {
+            _accountSubLabel.text = @"Configure your Google OAuth Client ID below to sign in and sync your YouTube Music library.";
+        }
+
+        if (!_codeCard.hidden) {
+            [_primaryBtn setTitle:@"Cancel Sign-In" forState:UIControlStateNormal];
+        } else {
+            [_primaryBtn setTitle:@"Sign In with Google" forState:UIControlStateNormal];
+        }
         _primaryBtn.enabled = YES;
-        _secondaryBtn.hidden = YES;
-        prefsY = _codeCard.hidden ? 178.0f : 346.0f;
+
+        [_secondaryBtn setTitle:(_showingOAuthConfig ? @"Hide OAuth Client Settings" : @"Configure OAuth Client")
+                       forState:UIControlStateNormal];
+        _secondaryBtn.hidden = NO;
+        _oauthCard.hidden = !_showingOAuthConfig;
+
+        if (!_oauthCard.hidden) {
+            _oauthCard.frame = CGRectMake(16, nextY, 288, 162);
+            nextY += 172.0f;
+        }
+        if (!_codeCard.hidden) {
+            _codeCard.frame = CGRectMake(16, nextY, 288, 160);
+            nextY += 170.0f;
+        }
     }
 
-    _prefsCard.frame = CGRectMake(16, prefsY, 288, 134);
-    CGFloat updateY = prefsY + 146.0f;
+    _prefsCard.frame = CGRectMake(16, nextY, 288, 192);
+    CGFloat updateY = nextY + 204.0f;
     _updateCard.frame = CGRectMake(16, updateY, 288, 122);
     _scrollView.contentSize = CGSizeMake(320, updateY + 188.0f);
 }
 
 - (void)onPrimaryTapped {
-    if ([[ELAuthManager sharedManager] isSignedIn]) {
+    [_clientIdField resignFirstResponder];
+    [_clientSecretField resignFirstResponder];
+
+    ELAuthManager *auth = [ELAuthManager sharedManager];
+    if ([auth isSignedIn]) {
         [self startLibrarySync];
-    } else {
-        [self startGoogleDeviceSignIn];
+        return;
     }
+    if (!_codeCard.hidden) {
+        /* Cancel active device sign-in polling */
+        _pollSession++;
+        [_spinner stopAnimating];
+        [_currentUserCode release];
+        _currentUserCode = nil;
+        [self maskUserCodeImmediately];
+        _codeCard.hidden = YES;
+        [self refreshUI];
+        return;
+    }
+    if (![auth hasConfiguredClientId]) {
+        _showingOAuthConfig = YES;
+        [self populateOAuthFields];
+        [self refreshUI];
+        [[ELAudioEngine sharedEngine] postToast:@"Enter your Google OAuth Client ID first"];
+        return;
+    }
+    [self startGoogleDeviceSignIn];
 }
 
 - (void)onSecondaryTapped {
-    _pollSession++;
-    [[ELAuthManager sharedManager] signOut];
-    [[ELYouTubeClient sharedClient] clearLibraryCache];
-    [self refreshUI];
+    [_clientIdField resignFirstResponder];
+    [_clientSecretField resignFirstResponder];
+
+    if ([[ELAuthManager sharedManager] isSignedIn]) {
+        _pollSession++;
+        [_currentUserCode release];
+        _currentUserCode = nil;
+        [self maskUserCodeImmediately];
+        _codeCard.hidden = YES;
+        [[ELAuthManager sharedManager] signOut];
+        [[ELYouTubeClient sharedClient] clearLibraryCache];
+        [self refreshUI];
+        [[ELAudioEngine sharedEngine] postToast:@"Signed out of Google Account"];
+    } else {
+        _showingOAuthConfig = !_showingOAuthConfig;
+        if (_showingOAuthConfig) {
+            [self populateOAuthFields];
+        }
+        [self refreshUI];
+    }
 }
 
 - (void)startGoogleDeviceSignIn {
     _pollSession++;
     NSInteger session = _pollSession;
 
+    [_currentUserCode release];
+    _currentUserCode = nil;
+    [self maskUserCodeImmediately];
+
+    _showingOAuthConfig = NO;
+    _oauthCard.hidden = YES;
     _codeCard.hidden = NO;
     _codeHintLabel.text = @"Requesting code from Google...";
     _codeValueLabel.text = @"----";
@@ -427,20 +692,30 @@
 
     NSInteger interval = info.interval;
     if (interval < 5) interval = 5;
-    NSTimeInterval deadline = [[NSDate date] timeIntervalSince1970] + info.expiresIn;
+    if (interval > 60) interval = 60;
 
-    while (session == _pollSession && [[NSDate date] timeIntervalSince1970] < deadline) {
+    NSInteger maxWait = info.expiresIn;
+    if (maxWait < 60) maxWait = 60;
+    if (maxWait > 900) maxWait = 900;
+
+    NSTimeInterval deadline = [ELHTTPClient syncedCurrentTime] + (NSTimeInterval)maxWait;
+    BOOL finished = NO;
+
+    while (session == _pollSession && [ELHTTPClient syncedCurrentTime] < deadline) {
         [NSThread sleepForTimeInterval:(NSTimeInterval)interval];
-        if (session != _pollSession) break;
+        if (session != _pollSession) { finished = YES; break; }
 
         NSString *pollErr = nil;
         ELAuthPollResult res = [[ELAuthManager sharedManager] pollTokenForDeviceCode:info.deviceCode error:&pollErr];
         if (res == ELAuthPollSuccess) {
+            finished = YES;
             [self performSelectorOnMainThread:@selector(onDeviceSignInSucceeded) withObject:nil waitUntilDone:NO];
             break;
         } else if (res == ELAuthPollSlowDown) {
             interval += 5;
+            if (interval > 60) interval = 60;
         } else if (res == ELAuthPollDeniedOrExpired) {
+            finished = YES;
             [self performSelectorOnMainThread:@selector(onDeviceCodeError:)
                                    withObject:(pollErr ? pollErr : @"Sign-in expired or cancelled")
                                 waitUntilDone:NO];
@@ -448,23 +723,39 @@
         }
     }
 
+    if (!finished && session == _pollSession) {
+        [self performSelectorOnMainThread:@selector(onDeviceCodeError:)
+                               withObject:@"Device code expired (15 min limit)."
+                            waitUntilDone:NO];
+    }
+
     [pool release];
 }
 
 - (void)onDeviceCodeReady:(ELDeviceCodeInfo *)info {
-    _codeHintLabel.text = [NSString stringWithFormat:@"Open %@\non any phone or computer and enter:",
+    [_currentUserCode release];
+    _currentUserCode = [info.userCode copy];
+    _codeRevealed = NO;
+    [self invalidateCodeMaskTimer];
+    _codeHintLabel.text = [NSString stringWithFormat:@"Open %@\non any phone/computer, then tap below to reveal code:",
                            info.verificationURL];
-    _codeValueLabel.text = info.userCode;
+    [self updateCodeLabelText];
     _codePollLabel.text = @"Waiting for Google approval...";
 }
 
 - (void)onDeviceCodeError:(NSString *)err {
     [_spinner stopAnimating];
+    [_currentUserCode release];
+    _currentUserCode = nil;
+    [self maskUserCodeImmediately];
     _codePollLabel.text = err;
 }
 
 - (void)onDeviceSignInSucceeded {
     [_spinner stopAnimating];
+    [_currentUserCode release];
+    _currentUserCode = nil;
+    [self maskUserCodeImmediately];
     _codeCard.hidden = YES;
     [self refreshUI];
     [self startLibrarySync];

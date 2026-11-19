@@ -164,16 +164,18 @@ static void el_afs_packets_cb(void *inClientData,
                               UInt32 inNumberPackets,
                               const void *inInputData,
                               AudioStreamPacketDescription *inPacketDescriptions) {
-    (void)inNumberBytes;
     el_stream_session_t *s = (el_stream_session_t *)inClientData;
-    if (!s->aq || s->stopFlag || s->seekFlag || !inPacketDescriptions) return;
+    if (!s || !s->aq || s->stopFlag || s->seekFlag || !inInputData || !inPacketDescriptions) return;
 
     const uint8_t *base = (const uint8_t *)inInputData;
     for (UInt32 i = 0; i < inNumberPackets; i++) {
         if (s->stopFlag || s->seekFlag) return;
         SInt64 off = inPacketDescriptions[i].mStartOffset;
         UInt32 psize = inPacketDescriptions[i].mDataByteSize;
-        if (psize == 0 || psize > EL_AQ_BUF_SIZE) continue;
+        if (off < 0 || psize == 0 || psize > EL_AQ_BUF_SIZE ||
+            (uint64_t)off + (uint64_t)psize > (uint64_t)inNumberBytes) {
+            continue;
+        }
 
         if (s->fillIdx >= 0 && (s->fillBytes + psize > EL_AQ_BUF_SIZE || s->fillPkts >= EL_AQ_MAX_PKTS)) {
             el_aq_enqueue_fill(s);
@@ -406,11 +408,22 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
         AudioSessionInitialize(NULL, NULL, el_audio_interruption_cb, self);
         AudioSessionAddPropertyListener(kAudioSessionProperty_AudioRouteChange, el_audio_route_change_cb, self);
         [self activateAudioSession];
+
+        NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+        [nc addObserver:self
+               selector:@selector(onAppDidEnterBackground:)
+                   name:UIApplicationDidEnterBackgroundNotification
+                 object:nil];
+        [nc addObserver:self
+               selector:@selector(onAppDidBecomeActive:)
+                   name:UIApplicationDidBecomeActiveNotification
+                 object:nil];
     }
     return self;
 }
 
 - (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
     [_sleepTimer invalidate];
     [_sleepTimer release]; _sleepTimer = nil;
     [_sleepFireDate release]; _sleepFireDate = nil;
@@ -818,9 +831,37 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
     [[NSNotificationCenter defaultCenter] postNotificationName:ELPlayerStateChangedNotification object:self];
 }
 
+- (BOOL)needsBackgroundPreNextTimer {
+    if (_state != ELPlayerStatePlaying) return NO;
+    ELTrack *cand = [self nextCandidateTrack];
+    if (!cand) return NO;
+    BOOL alreadyAttempted = NO;
+    pthread_mutex_lock(&g_prenext_lock);
+    alreadyAttempted = (_preNextAttemptedSessionToken == _sessionToken &&
+                        _preNextAttemptedVideoId &&
+                        [_preNextAttemptedVideoId isEqualToString:cand.videoId]);
+    pthread_mutex_unlock(&g_prenext_lock);
+    return !alreadyAttempted;
+}
+
 - (void)startProgressTimer {
     [_progressTimer invalidate];
     [_progressTimer release];
+    _progressTimer = nil;
+
+    if (_state != ELPlayerStatePlaying) return;
+
+    if (_isBackgrounded) {
+        /* While backgrounded/screen-locked, only run a sparse 3s timer until pre-next buffering triggers */
+        if (![self needsBackgroundPreNextTimer]) return;
+        _progressTimer = [[NSTimer scheduledTimerWithTimeInterval:3.0
+                                                           target:self
+                                                         selector:@selector(onProgressTick)
+                                                         userInfo:nil
+                                                          repeats:YES] retain];
+        return;
+    }
+
     _progressTimer = [[NSTimer scheduledTimerWithTimeInterval:0.5
                                                        target:self
                                                      selector:@selector(onProgressTick)
@@ -834,9 +875,33 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
     _progressTimer = nil;
 }
 
+- (void)onAppDidEnterBackground:(NSNotification *)note {
+    (void)note;
+    _isBackgrounded = YES;
+    if (_state == ELPlayerStatePlaying) {
+        [self startProgressTimer];
+    } else {
+        [self stopProgressTimer];
+    }
+}
+
+- (void)onAppDidBecomeActive:(NSNotification *)note {
+    (void)note;
+    _isBackgrounded = NO;
+    if (_state == ELPlayerStatePlaying) {
+        [self startProgressTimer];
+        [self onProgressTick];
+    }
+}
+
 - (void)onProgressTick {
-    [[NSNotificationCenter defaultCenter] postNotificationName:ELPlayerProgressNotification object:self];
+    if (!_isBackgrounded) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:ELPlayerProgressNotification object:self];
+    }
     [self maybeTriggerPreNextBuffer];
+    if (_isBackgrounded && ![self needsBackgroundPreNextTimer]) {
+        [self stopProgressTimer];
+    }
 }
 
 - (void)signalStopActiveStream {
@@ -1172,6 +1237,7 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
 
 - (void)streamThreadMain:(NSDictionary *)args {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    [NSThread setThreadPriority:0.65];
     ELTrack *track = [args objectForKey:@"track"];
     NSInteger myToken = [[args objectForKey:@"token"] integerValue];
     ELStreamInfo *preStreamInfo = [args objectForKey:@"preStreamInfo"];
@@ -1485,6 +1551,7 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
 }
 
 - (void)pause {
+    [self stopProgressTimer];
     if (_playingOffline && _offlinePlayer) {
         [_offlinePlayer pause];
         _state = ELPlayerStatePaused;
@@ -1508,6 +1575,7 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
     if (_playingOffline && _offlinePlayer) {
         [_offlinePlayer play];
         _state = ELPlayerStatePlaying;
+        [self startProgressTimer];
         [self postStateChanged];
         return;
     }
@@ -1522,6 +1590,7 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
     pthread_mutex_unlock(&g_active_lock);
     if (_state == ELPlayerStatePaused) {
         _state = ELPlayerStatePlaying;
+        [self startProgressTimer];
         [self postStateChanged];
     }
 }

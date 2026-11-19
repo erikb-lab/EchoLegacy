@@ -13,6 +13,8 @@ NSString *const ELDownloadBatchProgressNotification = @"ELDownloadBatchProgressN
 
 /* Max 2 simultaneous TLS downloads to protect 128 MB RAM & ARM11 CPU */
 #define EL_MAX_CONCURRENT_DOWNLOADS 2
+#define EL_MAX_TRACK_DOWNLOAD_BYTES (50LL * 1024LL * 1024LL)
+#define EL_MIN_FREE_DISK_BYTES      (64ULL * 1024ULL * 1024ULL)
 
 typedef struct {
     FILE *outFile;
@@ -21,6 +23,8 @@ typedef struct {
     NSString *videoId;
     long long expectedBytes;
     long long receivedBytes;
+    size_t adtsFramesWritten;
+    long long adtsBytesWritten;
     int lastReportedPct;
     double lastPriority;
     BOOL writeError;
@@ -29,14 +33,22 @@ typedef struct {
 static void el_dl_on_adts_frame(const uint8_t *adts, size_t len, void *userData) {
     el_dl_ctx_t *d = (el_dl_ctx_t *)userData;
     if (!d || !d->outFile || d->writeError) return;
+    if (d->adtsBytesWritten + (long long)len > EL_MAX_TRACK_DOWNLOAD_BYTES) {
+        d->writeError = YES;
+        return;
+    }
     if (fwrite(adts, 1, len, d->outFile) != len) {
         d->writeError = YES;
+        return;
     }
+    d->adtsFramesWritten++;
+    d->adtsBytesWritten += (long long)len;
 }
 
 @interface ELDownloadManager (Internal)
 - (double)currentWorkerPriority;
 - (NSUInteger)currentMaxConcurrentDownloads;
+- (BOOL)hasSufficientFreeDiskSpace;
 - (void)loadIndex;
 - (void)pumpQueue;
 @end
@@ -45,6 +57,16 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
     el_dl_ctx_t *d = (el_dl_ctx_t *)userData;
     if (!d || d->writeError) return NO;
     if (![d->mgr isDownloading:d->videoId]) return NO; /* Cancelled */
+
+    if (contentLength > 0 && d->expectedBytes <= 0) {
+        d->expectedBytes = contentLength;
+    }
+    if (contentLength > EL_MAX_TRACK_DOWNLOAD_BYTES ||
+        d->expectedBytes > EL_MAX_TRACK_DOWNLOAD_BYTES ||
+        d->receivedBytes + (long long)length > EL_MAX_TRACK_DOWNLOAD_BYTES) {
+        d->writeError = YES;
+        return NO;
+    }
 
     double targetPrio = [d->mgr currentWorkerPriority];
     if (targetPrio != d->lastPriority) {
@@ -148,12 +170,12 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
 }
 
 - (NSString *)localAudioPathForVideoId:(NSString *)videoId {
-    if ([videoId length] == 0) return nil;
+    if (!el_is_valid_video_id(videoId)) return nil;
     return [_downloadsDir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.aac", videoId]];
 }
 
 - (NSString *)localArtPathForVideoId:(NSString *)videoId {
-    if ([videoId length] == 0) return nil;
+    if (!el_is_valid_video_id(videoId)) return nil;
     return [_downloadsDir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.jpg", videoId]];
 }
 
@@ -163,6 +185,13 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
         return [UIImage imageWithContentsOfFile:p];
     }
     return nil;
+}
+
+- (BOOL)hasSufficientFreeDiskSpace {
+    NSDictionary *fsAttrs = [[NSFileManager defaultManager] attributesOfFileSystemForPath:_downloadsDir error:nil];
+    NSNumber *freeNum = [fsAttrs objectForKey:NSFileSystemFreeSize];
+    if (!freeNum) return YES;
+    return ([freeNum unsignedLongLongValue] >= EL_MIN_FREE_DISK_BYTES);
 }
 
 - (unsigned long long)totalDownloadedBytes {
@@ -187,10 +216,13 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
         [_downloadedIds removeAllObjects];
         for (id item in arr) {
             ELTrack *t = [ELTrack trackFromDictionary:item];
-            if (t && [t.videoId length] > 0 && [fm fileExistsAtPath:[self localAudioPathForVideoId:t.videoId]]) {
-                if (![_downloadedIds containsObject:t.videoId]) {
-                    [_tracks addObject:t];
-                    [_downloadedIds addObject:t.videoId];
+            if (t && el_is_valid_video_id(t.videoId)) {
+                NSString *audioPath = [self localAudioPathForVideoId:t.videoId];
+                if (audioPath && [fm fileExistsAtPath:audioPath]) {
+                    if (![_downloadedIds containsObject:t.videoId]) {
+                        [_tracks addObject:t];
+                        [_downloadedIds addObject:t.videoId];
+                    }
                 }
             }
         }
@@ -212,14 +244,14 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
 }
 
 - (BOOL)isDownloaded:(NSString *)videoId {
-    if ([videoId length] == 0) return NO;
+    if (!el_is_valid_video_id(videoId)) return NO;
     @synchronized(self) {
         return [_downloadedIds containsObject:videoId];
     }
 }
 
 - (BOOL)isDownloading:(NSString *)videoId {
-    if ([videoId length] == 0) return NO;
+    if (!el_is_valid_video_id(videoId)) return NO;
     @synchronized(self) {
         if ([_cancelledIds containsObject:videoId]) return NO;
         return [_activeIds containsObject:videoId];
@@ -227,14 +259,14 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
 }
 
 - (BOOL)isQueued:(NSString *)videoId {
-    if ([videoId length] == 0) return NO;
+    if (!el_is_valid_video_id(videoId)) return NO;
     @synchronized(self) {
         return [_queuedIds containsObject:videoId];
     }
 }
 
 - (float)progressForVideoId:(NSString *)videoId {
-    if ([videoId length] == 0) return 0.0f;
+    if (!el_is_valid_video_id(videoId)) return 0.0f;
     @synchronized(self) {
         NSNumber *n = [_progressById objectForKey:videoId];
         return n ? [n floatValue] : 0.0f;
@@ -381,7 +413,7 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
 }
 
 - (void)downloadTrack:(ELTrack *)track {
-    if (!track || [track.videoId length] == 0) return;
+    if (!track || !el_is_valid_video_id(track.videoId)) return;
 
     @synchronized(self) {
         if ([_downloadedIds containsObject:track.videoId] ||
@@ -402,7 +434,7 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
     BOOL added = NO;
     @synchronized(self) {
         for (ELTrack *track in tracks) {
-            if (!track || [track.videoId length] == 0) continue;
+            if (!track || !el_is_valid_video_id(track.videoId)) continue;
             if ([_downloadedIds containsObject:track.videoId] ||
                 [_activeIds containsObject:track.videoId] ||
                 [_queuedIds containsObject:track.videoId]) {
@@ -436,7 +468,7 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
 
         NSMutableSet *seenBatch = [NSMutableSet set];
         for (ELTrack *track in tracks) {
-            if (!track || [track.videoId length] == 0) continue;
+            if (!track || !el_is_valid_video_id(track.videoId)) continue;
             if ([seenBatch containsObject:track.videoId]) continue;
             [seenBatch addObject:track.videoId];
 
@@ -499,19 +531,31 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
     NSFileManager *fm = [[[NSFileManager alloc] init] autorelease];
     NSString *vid = track.videoId;
     NSString *finalAudio = [self localAudioPathForVideoId:vid];
-    NSString *tmpAudio = [finalAudio stringByAppendingString:@".part"];
+    NSString *tmpAudio = finalAudio ? [finalAudio stringByAppendingString:@".part"] : nil;
     BOOL success = NO;
+    BOOL diskFull = ![self hasSufficientFreeDiskSpace];
+
+    if (diskFull) {
+        [self performSelectorOnMainThread:@selector(postBatchToastOnMain:)
+                               withObject:@"Low disk space (< 64 MB free)"
+                            waitUntilDone:NO];
+    }
 
     NSString *err = nil;
-    ELStreamInfo *stream = [[ELYouTubeClient sharedClient] resolveAudioStreamForVideoId:vid error:&err];
-    if (stream && [self isDownloading:vid]) {
+    ELStreamInfo *stream = (!diskFull && finalAudio && el_is_valid_video_id(vid))
+        ? [[ELYouTubeClient sharedClient] resolveAudioStreamForVideoId:vid error:&err]
+        : nil;
+    if (stream && [self isDownloading:vid] &&
+        stream.contentLength <= EL_MAX_TRACK_DOWNLOAD_BYTES &&
+        ELValidateHTTPSURL(stream.url, ELHostCategoryMediaStream, NULL, NULL, NULL)) {
         NSString *artSrc = ([track.artURL length] > 0) ? track.artURL : track.thumbURL;
-        if ([artSrc length] > 0) {
+        if ([artSrc length] > 0 && ELValidateHTTPSURL(artSrc, ELHostCategoryThumbnail, NULL, NULL, NULL)) {
             NSData *jpg = [[ELImageCache sharedCache] downloadImageDataSyncForURL:artSrc];
-            if (jpg) [jpg writeToFile:[self localArtPathForVideoId:vid] atomically:YES];
+            NSString *artPath = [self localArtPathForVideoId:vid];
+            if (jpg && artPath) [jpg writeToFile:artPath atomically:YES];
         }
 
-        FILE *fp = fopen([tmpAudio UTF8String], "wb");
+        FILE *fp = tmpAudio ? fopen([tmpAudio UTF8String], "wb") : NULL;
         if (fp) {
             el_dl_ctx_t dctx;
             memset(&dctx, 0, sizeof(dctx));
@@ -524,7 +568,7 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
             dctx.lastPriority = initPrio;
 
             NSDictionary *hdrs = [NSDictionary dictionaryWithObjectsAndKeys:
-                                  stream.userAgent, @"User-Agent",
+                                  stream.userAgent ? stream.userAgent : @"", @"User-Agent",
                                   nil];
             NSInteger status = 0;
             NSString *httpErr = nil;
@@ -532,12 +576,13 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
                                                                    headers:hdrs
                                                                startOffset:0
                                                                totalLength:stream.contentLength
-                                                                 chunkSize:524288
+                                                                 chunkSize:1572864
                                                                   callback:el_dl_on_http_chunk
                                                                   userData:&dctx
                                                                 statusCode:&status
                                                                      error:&httpErr];
             fclose(fp);
+            BOOL hasAudioCfg = (el_fmp4_has_config(dctx.fmp4) != 0);
             double parsedDur = el_fmp4_total_duration(dctx.fmp4);
             if (parsedDur > 0 && track.durationSeconds <= 0) {
                 track.durationSeconds = (NSInteger)parsedDur;
@@ -545,7 +590,14 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
             }
             el_fmp4_destroy(dctx.fmp4);
 
-            if (ok && (status == 200 || status == 206) && !dctx.writeError && [self isDownloading:vid] && dctx.receivedBytes > 1024) {
+            BOOL sizeMatches = (dctx.expectedBytes <= 0 || dctx.receivedBytes == dctx.expectedBytes);
+            BOOL validOutput = (hasAudioCfg && parsedDur > 0.0 &&
+                                dctx.adtsFramesWritten > 0 && dctx.adtsBytesWritten > 1024);
+            if (ok && (status == 200 || status == 206) && !dctx.writeError &&
+                [self isDownloading:vid] &&
+                dctx.receivedBytes > 1024 &&
+                dctx.receivedBytes <= EL_MAX_TRACK_DOWNLOAD_BYTES &&
+                sizeMatches && validOutput) {
                 [fm removeItemAtPath:finalAudio error:nil];
                 if ([fm moveItemAtPath:tmpAudio toPath:finalAudio error:nil]) {
                     success = YES;
@@ -554,7 +606,7 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
         }
     }
 
-    if (!success) {
+    if (!success && tmpAudio) {
         [fm removeItemAtPath:tmpAudio error:nil];
     }
 
@@ -577,7 +629,7 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
             }
             [_tracks insertObject:track atIndex:0];
             [_downloadedIds addObject:vid];
-        } else if (!wasCancelled) {
+        } else if (!wasCancelled && !diskFull) {
             NSInteger retries = [[_retryCountById objectForKey:vid] integerValue];
             if (retries < 2) {
                 [_retryCountById setObject:[NSNumber numberWithInteger:retries + 1] forKey:vid];
@@ -631,7 +683,7 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
 }
 
 - (void)cancelDownloadForVideoId:(NSString *)videoId {
-    if ([videoId length] == 0) return;
+    if (!el_is_valid_video_id(videoId)) return;
     @synchronized(self) {
         [_cancelledIds addObject:videoId];
         [_queuedIds removeObject:videoId];
@@ -648,7 +700,7 @@ static BOOL el_dl_on_http_chunk(const uint8_t *bytes, NSUInteger length, long lo
 }
 
 - (void)deleteDownloadForVideoId:(NSString *)videoId {
-    if ([videoId length] == 0) return;
+    if (!el_is_valid_video_id(videoId)) return;
     [self cancelDownloadForVideoId:videoId];
     NSFileManager *fm = [NSFileManager defaultManager];
     [fm removeItemAtPath:[self localAudioPathForVideoId:videoId] error:nil];
