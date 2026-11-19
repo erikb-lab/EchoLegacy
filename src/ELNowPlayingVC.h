@@ -11,8 +11,14 @@
     UIView *_lyricsContainer;
     UITableView *_lyricsTable;
     UILabel *_lyricsStatusLabel;
+    UIView *_titleMarqueeContainer;
+    UIView *_titleTrackView;
     UILabel *_titleLabel;
+    UILabel *_titleLabelClone;
+    UIView *_artistMarqueeContainer;
+    UIView *_artistTrackView;
     UILabel *_artistLabel;
+    UILabel *_artistLabelClone;
     UIButton *_moreBtn;
     UIButton *_likeBtn;
     UISlider *_scrubber;
@@ -32,6 +38,7 @@
     BOOL _isScrubbing;
     BOOL _isLiked;
     BOOL _showingLyrics;
+    BOOL _isViewVisible;
     NSInteger _likeRequestGen;
     NSInteger _lyricsGen;
     NSInteger _activeLyricIndex;
@@ -43,6 +50,8 @@
     NSString *_currentVideoId;
     NSString *_loadedArtKey;
     NSString *_loadedArtURL;
+    NSString *_lastTitleText;
+    NSString *_lastArtistText;
 }
 
 @end

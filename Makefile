@@ -84,11 +84,11 @@ third_party/build/libmbedcrypto.a: third_party/build/libmbedtls.a
 
 mbedtls: $(MBED_LIBS)
 
-$(APP_DIR)/$(APP_NAME): $(ALL_OBJS) $(MBED_LIBS) Info.plist resources/cacert.pem
+$(APP_DIR)/$(APP_NAME): $(ALL_OBJS) $(MBED_LIBS) Info.plist entitlements.plist resources/cacert.pem
 	mkdir -p $(APP_DIR)
 	$(CC) $(ALL_OBJS) $(MBED_LIBS) $(LDFLAGS) -o $@
 	$(STRIP) -x $@
-	$(LDID) -S $@
+	$(LDID) -Sentitlements.plist $@
 	cp Info.plist $(APP_DIR)/Info.plist
 	cp resources/cacert.pem $(APP_DIR)/cacert.pem
 	@if [ -f resources/Icon.png ]; then cp resources/Icon.png $(APP_DIR)/Icon.png; fi

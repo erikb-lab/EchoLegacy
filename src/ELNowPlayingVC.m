@@ -6,6 +6,17 @@
 #import "ELQueueVC.h"
 #import "ELTheme.h"
 #import "ELYouTubeClient.h"
+#import <math.h>
+
+static const CGFloat kELMarqueeGap = 40.0f;
+static const CGFloat kELMarqueeSpeed = 32.0f;
+static const CFTimeInterval kELMarqueePause = 1.6;
+static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
+
+@interface ELNowPlayingVC ()
+- (void)startMarqueesIfVisible;
+- (void)stopMarquees;
+@end
 
 @implementation ELNowPlayingVC
 
@@ -16,12 +27,16 @@
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     [self becomeFirstResponder];
+    _isViewVisible = YES;
     _lastDisplayedElapsedSec = -1;
     _lastDisplayedDurationSec = -1;
     [self refreshProgress];
+    [self startMarqueesIfVisible];
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
+    _isViewVisible = NO;
+    [self stopMarquees];
     [self resignFirstResponder];
     [super viewWillDisappear:animated];
 }
@@ -189,22 +204,62 @@
     [_downloadBtn addTarget:self action:@selector(onDownloadTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:_downloadBtn];
 
-    /* Left-aligned bold track title & artist + right-side (•••) Actions & Heart pills */
-    _titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(20.0f, 268.0f, 198.0f, 24.0f)];
+    /* Left-aligned bold track title & artist (with marquee scroll on overflow) + right-side (•••) Actions & Heart pills */
+    UIFont *titleFont = [UIFont boldSystemFontOfSize:18.0f];
+    _titleMarqueeContainer = [[UIView alloc] initWithFrame:CGRectMake(20.0f, 268.0f, 198.0f, 24.0f)];
+    _titleMarqueeContainer.backgroundColor = [UIColor clearColor];
+    _titleMarqueeContainer.clipsToBounds = YES;
+    _titleMarqueeContainer.userInteractionEnabled = NO;
+    [self.view addSubview:_titleMarqueeContainer];
+
+    _titleTrackView = [[UIView alloc] initWithFrame:_titleMarqueeContainer.bounds];
+    _titleTrackView.backgroundColor = [UIColor clearColor];
+    [_titleMarqueeContainer addSubview:_titleTrackView];
+
+    _titleLabel = [[UILabel alloc] initWithFrame:_titleMarqueeContainer.bounds];
     _titleLabel.backgroundColor = [UIColor clearColor];
-    _titleLabel.font = [UIFont boldSystemFontOfSize:18.0f];
+    _titleLabel.font = titleFont;
     _titleLabel.textColor = [UIColor whiteColor];
     _titleLabel.textAlignment = UITextAlignmentLeft;
-    _titleLabel.lineBreakMode = UILineBreakModeTailTruncation;
-    [self.view addSubview:_titleLabel];
+    _titleLabel.lineBreakMode = UILineBreakModeClip;
+    [_titleTrackView addSubview:_titleLabel];
 
-    _artistLabel = [[UILabel alloc] initWithFrame:CGRectMake(20.0f, 294.0f, 198.0f, 19.0f)];
+    _titleLabelClone = [[UILabel alloc] initWithFrame:_titleMarqueeContainer.bounds];
+    _titleLabelClone.backgroundColor = [UIColor clearColor];
+    _titleLabelClone.font = titleFont;
+    _titleLabelClone.textColor = [UIColor whiteColor];
+    _titleLabelClone.textAlignment = UITextAlignmentLeft;
+    _titleLabelClone.lineBreakMode = UILineBreakModeClip;
+    _titleLabelClone.hidden = YES;
+    [_titleTrackView addSubview:_titleLabelClone];
+
+    UIFont *artistFont = [UIFont systemFontOfSize:14.0f];
+    _artistMarqueeContainer = [[UIView alloc] initWithFrame:CGRectMake(20.0f, 294.0f, 198.0f, 19.0f)];
+    _artistMarqueeContainer.backgroundColor = [UIColor clearColor];
+    _artistMarqueeContainer.clipsToBounds = YES;
+    _artistMarqueeContainer.userInteractionEnabled = NO;
+    [self.view addSubview:_artistMarqueeContainer];
+
+    _artistTrackView = [[UIView alloc] initWithFrame:_artistMarqueeContainer.bounds];
+    _artistTrackView.backgroundColor = [UIColor clearColor];
+    [_artistMarqueeContainer addSubview:_artistTrackView];
+
+    _artistLabel = [[UILabel alloc] initWithFrame:_artistMarqueeContainer.bounds];
     _artistLabel.backgroundColor = [UIColor clearColor];
-    _artistLabel.font = [UIFont systemFontOfSize:14.0f];
+    _artistLabel.font = artistFont;
     _artistLabel.textColor = secondaryWhite;
     _artistLabel.textAlignment = UITextAlignmentLeft;
-    _artistLabel.lineBreakMode = UILineBreakModeTailTruncation;
-    [self.view addSubview:_artistLabel];
+    _artistLabel.lineBreakMode = UILineBreakModeClip;
+    [_artistTrackView addSubview:_artistLabel];
+
+    _artistLabelClone = [[UILabel alloc] initWithFrame:_artistMarqueeContainer.bounds];
+    _artistLabelClone.backgroundColor = [UIColor clearColor];
+    _artistLabelClone.font = artistFont;
+    _artistLabelClone.textColor = secondaryWhite;
+    _artistLabelClone.textAlignment = UITextAlignmentLeft;
+    _artistLabelClone.lineBreakMode = UILineBreakModeClip;
+    _artistLabelClone.hidden = YES;
+    [_artistTrackView addSubview:_artistLabelClone];
 
     _moreBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
     _moreBtn.frame = CGRectMake(224.0f, 273.0f, 36.0f, 36.0f);
@@ -313,12 +368,16 @@
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refreshDownloadBtn) name:ELDownloadsChangedNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refreshDownloadBtn) name:ELDownloadProgressNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onLibraryUpdated) name:ELLibraryUpdatedNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onAppDidBecomeActive) name:UIApplicationDidBecomeActiveNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onAppWillResignActive) name:UIApplicationWillResignActiveNotification object:nil];
 
     [self refreshAll];
 }
 
 - (void)releaseViewOutlets {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    _isViewVisible = NO;
+    [self stopMarquees];
     [_backdropGradient release]; _backdropGradient = nil;
     [_topScrimLayer release]; _topScrimLayer = nil;
     [_artFadeLayer release]; _artFadeLayer = nil;
@@ -328,8 +387,16 @@
     [_lyricsContainer release]; _lyricsContainer = nil;
     [_lyricsTable release]; _lyricsTable = nil;
     [_lyricsStatusLabel release]; _lyricsStatusLabel = nil;
+    [_titleMarqueeContainer release]; _titleMarqueeContainer = nil;
+    [_titleTrackView release]; _titleTrackView = nil;
     [_titleLabel release]; _titleLabel = nil;
+    [_titleLabelClone release]; _titleLabelClone = nil;
+    [_artistMarqueeContainer release]; _artistMarqueeContainer = nil;
+    [_artistTrackView release]; _artistTrackView = nil;
     [_artistLabel release]; _artistLabel = nil;
+    [_artistLabelClone release]; _artistLabelClone = nil;
+    [_lastTitleText release]; _lastTitleText = nil;
+    [_lastArtistText release]; _lastArtistText = nil;
     [_moreBtn release]; _moreBtn = nil;
     [_likeBtn release]; _likeBtn = nil;
     [_scrubber release]; _scrubber = nil;
@@ -569,6 +636,111 @@
     }
 }
 
+#pragma mark - Marquee Scrolling
+
+- (void)stopMarqueeOnTrackView:(UIView *)trackView {
+    if (!trackView) return;
+    [trackView.layer removeAnimationForKey:kELMarqueeAnimKey];
+}
+
+- (void)configureMarqueeForContainer:(UIView *)container
+                           trackView:(UIView *)trackView
+                               label:(UILabel *)label
+                               clone:(UILabel *)clone
+                                text:(NSString *)text
+                         shouldStart:(BOOL)shouldStart {
+    if (!container || !trackView || !label || !clone) return;
+    NSString *safeText = text ? text : @"";
+    label.text = safeText;
+    clone.text = safeText;
+
+    [trackView.layer removeAnimationForKey:kELMarqueeAnimKey];
+
+    CGFloat containerW = container.bounds.size.width;
+    CGFloat containerH = container.bounds.size.height;
+    CGSize measured = [safeText sizeWithFont:label.font];
+    CGFloat textW = ceilf((float)measured.width);
+
+    if (textW <= containerW + 0.5f || [safeText length] == 0) {
+        label.lineBreakMode = UILineBreakModeClip;
+        clone.lineBreakMode = UILineBreakModeClip;
+        trackView.frame = CGRectMake(0.0f, 0.0f, containerW, containerH);
+        label.frame = CGRectMake(0.0f, 0.0f, containerW, containerH);
+        clone.hidden = YES;
+        return;
+    }
+
+    /* PowerVR MBX Lite (iPod touch 2G) max layer texture width is 1024px */
+    if (textW > 960.0f) {
+        textW = 960.0f;
+        label.lineBreakMode = UILineBreakModeTailTruncation;
+        clone.lineBreakMode = UILineBreakModeTailTruncation;
+    } else {
+        label.lineBreakMode = UILineBreakModeClip;
+        clone.lineBreakMode = UILineBreakModeClip;
+    }
+
+    CGFloat scrollDist = textW + kELMarqueeGap;
+    trackView.frame = CGRectMake(0.0f, 0.0f, scrollDist + textW, containerH);
+    label.frame = CGRectMake(0.0f, 0.0f, textW, containerH);
+    clone.frame = CGRectMake(scrollDist, 0.0f, textW, containerH);
+    clone.hidden = NO;
+
+    if (!shouldStart) return;
+
+    CFTimeInterval scrollDur = (CFTimeInterval)(scrollDist / kELMarqueeSpeed);
+    if (scrollDur < 2.0) scrollDur = 2.0;
+    CFTimeInterval totalDur = kELMarqueePause + scrollDur;
+    double pauseFrac = kELMarqueePause / totalDur;
+
+    CAKeyframeAnimation *anim = [CAKeyframeAnimation animationWithKeyPath:@"transform.translation.x"];
+    anim.values = [NSArray arrayWithObjects:
+                   [NSNumber numberWithFloat:0.0f],
+                   [NSNumber numberWithFloat:0.0f],
+                   [NSNumber numberWithFloat:(float)(-scrollDist)],
+                   nil];
+    anim.keyTimes = [NSArray arrayWithObjects:
+                     [NSNumber numberWithDouble:0.0],
+                     [NSNumber numberWithDouble:pauseFrac],
+                     [NSNumber numberWithDouble:1.0],
+                     nil];
+    CAMediaTimingFunction *linear = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+    anim.timingFunctions = [NSArray arrayWithObjects:linear, linear, nil];
+    anim.duration = totalDur;
+    anim.repeatCount = HUGE_VALF;
+    anim.removedOnCompletion = NO;
+    [trackView.layer addAnimation:anim forKey:kELMarqueeAnimKey];
+}
+
+- (void)startMarqueesIfVisible {
+    if (!_isViewVisible) return;
+    [self configureMarqueeForContainer:_titleMarqueeContainer
+                             trackView:_titleTrackView
+                                 label:_titleLabel
+                                 clone:_titleLabelClone
+                                  text:_lastTitleText
+                           shouldStart:YES];
+    [self configureMarqueeForContainer:_artistMarqueeContainer
+                             trackView:_artistTrackView
+                                 label:_artistLabel
+                                 clone:_artistLabelClone
+                                  text:_lastArtistText
+                           shouldStart:YES];
+}
+
+- (void)stopMarquees {
+    [self stopMarqueeOnTrackView:_titleTrackView];
+    [self stopMarqueeOnTrackView:_artistTrackView];
+}
+
+- (void)onAppDidBecomeActive {
+    [self startMarqueesIfVisible];
+}
+
+- (void)onAppWillResignActive {
+    [self stopMarquees];
+}
+
 - (void)setArtworkImage:(UIImage *)img forKey:(NSString *)artKey animated:(BOOL)animated {
     if (!img) img = [ELTheme placeholderArtImage];
     _artView.image = img;
@@ -610,8 +782,8 @@
         }
     }
 
-    _titleLabel.text = track.title;
-    _artistLabel.text = track.artist;
+    NSString *titleText = track.title ? track.title : @"";
+    NSString *artistText = track.artist ? track.artist : @"";
 
     if (eng.isPlayingOffline) {
         _sourceBadge.text = @"OFFLINE AAC";
@@ -622,10 +794,31 @@
     } else if (eng.state == ELPlayerStateError) {
         _sourceBadge.text = @"STREAM ERROR";
         _sourceBadge.textColor = [ELTheme accentColor];
-        if (eng.lastError) _artistLabel.text = eng.lastError;
+        if (eng.lastError) artistText = eng.lastError;
     } else {
         _sourceBadge.text = @"STREAMING";
         _sourceBadge.textColor = streamBadgeColor;
+    }
+
+    if (!_lastTitleText || ![_lastTitleText isEqualToString:titleText]) {
+        [_lastTitleText release];
+        _lastTitleText = [titleText copy];
+        [self configureMarqueeForContainer:_titleMarqueeContainer
+                                 trackView:_titleTrackView
+                                     label:_titleLabel
+                                     clone:_titleLabelClone
+                                      text:_lastTitleText
+                               shouldStart:_isViewVisible];
+    }
+    if (!_lastArtistText || ![_lastArtistText isEqualToString:artistText]) {
+        [_lastArtistText release];
+        _lastArtistText = [artistText copy];
+        [self configureMarqueeForContainer:_artistMarqueeContainer
+                                 trackView:_artistTrackView
+                                     label:_artistLabel
+                                     clone:_artistLabelClone
+                                      text:_lastArtistText
+                               shouldStart:_isViewVisible];
     }
 
     if (eng.state == ELPlayerStateLoading) {
