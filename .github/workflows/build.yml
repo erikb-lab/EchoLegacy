@@ -63,7 +63,12 @@ jobs:
 
       - name: Resolve toolchain bin path & build mbedTLS + EchoLegacy IPA
         run: |
-          TC_BIN="$(dirname "$(find /tmp/el_ci_toolchain -name clang -type f | head -n1)")"
+          TC_BIN="$(dirname "$(find /tmp/el_ci_toolchain -name clang \( -type f -o -type l \) | head -n1)")"
+          if [ ! -x "$TC_BIN/clang" ]; then
+            echo "ERROR: clang not found in /tmp/el_ci_toolchain"
+            find /tmp/el_ci_toolchain -maxdepth 4
+            exit 1
+          fi
           SDK_DIR="/tmp/el_ci_sdks/iPhoneOS4.1.sdk"
           echo "Using TOOLCHAIN=$TC_BIN"
           echo "Using SDK=$SDK_DIR"
