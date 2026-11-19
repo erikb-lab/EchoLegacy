@@ -6,6 +6,8 @@
     NSMutableSet *_inFlight;
     NSMutableArray *_thumbQueue;
     NSInteger _activeThumbWorkers;
+    NSInteger _diskWritesSincePrune;
+    BOOL _isPruningDiskCache;
     NSString *_diskDir;
 }
 

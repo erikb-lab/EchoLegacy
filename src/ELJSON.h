@@ -3,6 +3,7 @@
 @interface ELJSON : NSObject
 
 + (id)objectWithData:(NSData *)data;
++ (id)youtubeObjectWithData:(NSData *)data;
 + (id)objectWithString:(NSString *)jsonString;
 + (NSData *)dataWithObject:(id)obj;
 + (NSString *)stringWithObject:(id)obj;

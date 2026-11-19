@@ -3,6 +3,7 @@
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -10,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -78,6 +80,7 @@ static mbedtls_ctr_drbg_context g_drbg;
 static mbedtls_ssl_config       g_ssl_conf;
 
 static int64_t                  g_clock_offset_sec = 0;
+static int64_t                  g_clock_high_water = EL_MIN_VALID_EPOCH;
 static BOOL                     g_clock_synced     = NO;
 
 /* 8-slot LRU TLS 1.2 session ticket/ID cache for abbreviated 1-RTT handshakes */
@@ -94,6 +97,69 @@ typedef struct {
 
 static el_tls_session_slot_t g_tls_sessions[EL_TLS_SESSION_CACHE_SLOTS];
 static uint64_t              g_tls_lru_clock = 0;
+
+/* 16-slot thread-safe DNS cache (IPv4-first, 5-minute TTL) to avoid repeated getaddrinfo stalls */
+#define EL_DNS_CACHE_SLOTS   16
+#define EL_DNS_CACHE_TTL_SEC 300
+
+typedef struct {
+    BOOL                    valid;
+    char                    key[128];
+    struct sockaddr_storage addr;
+    socklen_t               addrlen;
+    time_t                  saved_at;
+    uint64_t                lru_seq;
+} el_dns_cache_slot_t;
+
+static pthread_mutex_t     g_dns_lock = PTHREAD_MUTEX_INITIALIZER;
+static el_dns_cache_slot_t g_dns_cache[EL_DNS_CACHE_SLOTS];
+static uint64_t            g_dns_lru_clock = 0;
+
+/* 6-slot thread-safe HTTPS/1.1 Keep-Alive connection pool (45s idle TTL) */
+#define EL_HTTP_POOL_SLOTS        6
+#define EL_HTTP_POOL_IDLE_TTL_SEC 45
+
+typedef struct {
+    BOOL       valid;
+    char       key[128];
+    time_t     last_used;
+    uint64_t   lru_seq;
+    el_conn_t *conn; /* Heap-allocated so &conn->net / &conn->vrfy_ctx pointers stay stable */
+} el_http_pool_slot_t;
+
+static pthread_mutex_t     g_http_pool_lock = PTHREAD_MUTEX_INITIALIZER;
+static el_http_pool_slot_t g_http_pool[EL_HTTP_POOL_SLOTS];
+static uint64_t            g_http_pool_lru_clock = 0;
+
+/* ARM11-optimized TLS 1.2 curve order: X25519 first (2-5x faster than P-384/P-521 on 533 MHz ARM11) */
+static const mbedtls_ecp_group_id g_fast_tls_curves[] = {
+    MBEDTLS_ECP_DP_CURVE25519,
+    MBEDTLS_ECP_DP_SECP256R1,
+    MBEDTLS_ECP_DP_SECP384R1,
+    MBEDTLS_ECP_DP_SECP521R1,
+    MBEDTLS_ECP_DP_NONE
+};
+
+/* ARM11-optimized TLS 1.2 ciphersuite order: ChaCha20-Poly1305 & AES-128-GCM first */
+static const int g_fast_tls_ciphersuites[] = {
+    MBEDTLS_TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+    MBEDTLS_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+    MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+    MBEDTLS_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+    MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+    MBEDTLS_TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+    MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
+    MBEDTLS_TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
+    MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
+    MBEDTLS_TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+    MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
+    MBEDTLS_TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+    MBEDTLS_TLS_RSA_WITH_AES_128_GCM_SHA256,
+    MBEDTLS_TLS_RSA_WITH_AES_256_GCM_SHA384,
+    MBEDTLS_TLS_RSA_WITH_AES_128_CBC_SHA256,
+    MBEDTLS_TLS_RSA_WITH_AES_128_CBC_SHA,
+    0
+};
 
 /* Pure integer UTC civil date to 64-bit Unix epoch seconds (immune to 32-bit time_t & local TZ) */
 static int64_t el_utc_to_epoch(int year, int mon, int day, int hour, int min, int sec) {
@@ -162,24 +228,40 @@ static int64_t el_synced_epoch_now(BOOL *outIsSynced) {
     pthread_mutex_unlock(&g_clock_lock);
 
     int64_t sys_now = (int64_t)time(NULL);
-    if (outIsSynced) *outIsSynced = (synced || sys_now >= EL_MIN_VALID_EPOCH);
+    if (outIsSynced) *outIsSynced = synced;
     return sys_now + offset;
 }
 
-static void el_update_clock_from_server_epoch(int64_t serverEpoch) {
-    if (serverEpoch < EL_MIN_VALID_EPOCH) return;
+static int64_t el_clock_high_water(void) {
+    pthread_mutex_lock(&g_clock_lock);
+    int64_t hw = g_clock_high_water;
+    pthread_mutex_unlock(&g_clock_lock);
+    return hw;
+}
+
+static BOOL el_update_clock_from_server_epoch(int64_t serverEpoch) {
+    if (serverEpoch < EL_MIN_VALID_EPOCH) return NO;
     int64_t sys_now = (int64_t)time(NULL);
     pthread_mutex_lock(&g_clock_lock);
+    if (serverEpoch < (g_clock_high_water - EL_CERT_CLOCK_SKEW_TOLERANCE)) {
+        pthread_mutex_unlock(&g_clock_lock);
+        return NO;
+    }
     g_clock_offset_sec = serverEpoch - sys_now;
     g_clock_synced = YES;
+    if (serverEpoch > g_clock_high_water) {
+        g_clock_high_water = serverEpoch;
+    }
     pthread_mutex_unlock(&g_clock_lock);
+    return YES;
 }
 
 /*
  * mbedTLS X.509 certificate verification callback.
  * Enforces strict CA trust, signature, key strength, and CN/SAN hostname verification,
  * while evaluating certificate validity timestamps against the synced UTC clock so an
- * iPod touch 2G with a dead/drifted RTC battery verifies certificates accurately.
+ * iPod touch 2G with a dead or drifted RTC battery (whether 1970, 2010, 2025, or 2026)
+ * verifies certificates accurately without hard-failing before HTTPS Date sync.
  */
 static int el_tls_verify_cb(void *data, mbedtls_x509_crt *crt, int depth, uint32_t *flags) {
     (void)depth;
@@ -188,9 +270,12 @@ static int el_tls_verify_cb(void *data, mbedtls_x509_crt *crt, int depth, uint32
     el_tls_vrfy_ctx_t *vctx = (el_tls_vrfy_ctx_t *)data;
     int64_t vfrom = el_x509_time_to_epoch(&crt->valid_from);
     int64_t vto   = el_x509_time_to_epoch(&crt->valid_to);
+    int64_t hw    = el_clock_high_water();
 
-    /* Reject malformed validity dates or any certificate that expired before 2025-02-19 */
-    if (vfrom <= 0 || vto <= 0 || vfrom >= vto || vto < EL_MIN_VALID_EPOCH) {
+    /* Reject malformed validity dates or any certificate that expired before our monotonic floor */
+    if (vfrom <= 0 || vto <= 0 || vfrom >= vto ||
+        vto < EL_MIN_VALID_EPOCH ||
+        vto < (hw - EL_CERT_CLOCK_SKEW_TOLERANCE)) {
         *flags |= MBEDTLS_X509_BADCERT_EXPIRED;
         return 0;
     }
@@ -217,25 +302,24 @@ static int el_tls_verify_cb(void *data, mbedtls_x509_crt *crt, int depth, uint32
         return 0;
     }
 
-    BOOL clockReady = NO;
-    int64_t eff_now = el_synced_epoch_now(&clockReady);
-    if (clockReady) {
-        if (eff_now >= (vfrom - EL_CERT_CLOCK_SKEW_TOLERANCE) &&
-            eff_now <= (vto + EL_CERT_CLOCK_SKEW_TOLERANCE)) {
-            *flags &= ~time_mask;
-        } else if (eff_now < vfrom) {
-            *flags |= MBEDTLS_X509_BADCERT_FUTURE;
-        } else {
-            *flags |= MBEDTLS_X509_BADCERT_EXPIRED;
-        }
+    BOOL clockSynced = NO;
+    int64_t eff_now = el_synced_epoch_now(&clockSynced);
+    if (eff_now >= (vfrom - EL_CERT_CLOCK_SKEW_TOLERANCE) &&
+        eff_now <= (vto + EL_CERT_CLOCK_SKEW_TOLERANCE)) {
+        *flags &= ~time_mask;
         return 0;
     }
 
-    /* Unsynced drifted RTC (< 2025-02-19): allow handshake to complete ONLY so el_read_headers
-       can immediately verify the server's Date header against [max_valid_from, min_valid_to]. */
+    /* Local RTC is unsynced or drifted after sleep: allow cryptographically-verified handshake
+       to finish ONLY so el_read_headers immediately validates the server's Date header against
+       both the monotonic high-water mark and [max_valid_from, min_valid_to]. */
     if (vctx) {
         vctx->used_clock_bootstrap = 1;
         *flags &= ~time_mask;
+    } else if (eff_now < vfrom) {
+        *flags |= MBEDTLS_X509_BADCERT_FUTURE;
+    } else {
+        *flags |= MBEDTLS_X509_BADCERT_EXPIRED;
     }
     return 0;
 }
@@ -320,6 +404,8 @@ static BOOL el_init_tls_once(NSString **errOut) {
     mbedtls_ssl_conf_ca_chain(&g_ssl_conf, &g_ca_chain, NULL);
     mbedtls_ssl_conf_verify(&g_ssl_conf, el_tls_verify_cb, NULL);
     mbedtls_ssl_conf_rng(&g_ssl_conf, el_tls_rng_cb, NULL);
+    mbedtls_ssl_conf_curves(&g_ssl_conf, g_fast_tls_curves);
+    mbedtls_ssl_conf_ciphersuites(&g_ssl_conf, g_fast_tls_ciphersuites);
 
     g_tls_ready = YES;
     pthread_mutex_unlock(&g_tls_init_lock);
@@ -655,6 +741,132 @@ static void el_conn_close(el_conn_t *c) {
     }
 }
 
+static void el_conn_destroy(el_conn_t *c) {
+    if (!c) return;
+    el_conn_close(c);
+    free(c);
+}
+
+static BOOL el_conn_is_idle_healthy(el_conn_t *c) {
+    if (!c || !c->is_https || c->net.fd < 0) return NO;
+    if (mbedtls_ssl_get_bytes_avail(&c->ssl) > 0) return NO;
+
+    int fd = c->net.fd;
+    if (fd >= FD_SETSIZE) return NO;
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(fd, &rfds);
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 0;
+    int sel = select(fd + 1, &rfds, NULL, NULL, &tv);
+    /* An idle HTTP/1.1 keep-alive connection must NOT have unread bytes (FIN/RST/close_notify) */
+    return (sel == 0);
+}
+
+static el_conn_t *el_http_pool_checkout(const char *host, const char *port) {
+    char key[128];
+    snprintf(key, sizeof(key), "%s:%s", host ? host : "", port ? port : "443");
+    time_t now = time(NULL);
+
+    el_conn_t *found = NULL;
+    el_conn_t *toClose[EL_HTTP_POOL_SLOTS];
+    int closeCount = 0;
+
+    pthread_mutex_lock(&g_http_pool_lock);
+    for (int i = 0; i < EL_HTTP_POOL_SLOTS; i++) {
+        el_http_pool_slot_t *s = &g_http_pool[i];
+        if (!s->valid || !s->conn) continue;
+
+        BOOL expired = (now < s->last_used || (now - s->last_used) > EL_HTTP_POOL_IDLE_TTL_SEC);
+        if (expired) {
+            toClose[closeCount++] = s->conn;
+            s->conn = NULL;
+            s->valid = NO;
+            continue;
+        }
+        if (!found && strcmp(s->key, key) == 0) {
+            el_conn_t *cand = s->conn;
+            s->conn = NULL;
+            s->valid = NO;
+            if (el_conn_is_idle_healthy(cand)) {
+                found = cand;
+            } else {
+                toClose[closeCount++] = cand;
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_http_pool_lock);
+
+    for (int i = 0; i < closeCount; i++) {
+        el_conn_destroy(toClose[i]);
+    }
+    return found;
+}
+
+static void el_http_pool_checkin(const char *host, const char *port, el_conn_t *c) {
+    if (!c) return;
+    if (!el_conn_is_idle_healthy(c)) {
+        el_conn_destroy(c);
+        return;
+    }
+
+    char key[128];
+    snprintf(key, sizeof(key), "%s:%s", host ? host : "", port ? port : "443");
+    time_t now = time(NULL);
+    el_conn_t *evicted = NULL;
+
+    pthread_mutex_lock(&g_http_pool_lock);
+    int target = -1;
+    uint64_t oldest_seq = UINT64_MAX;
+    int oldest_idx = 0;
+    for (int i = 0; i < EL_HTTP_POOL_SLOTS; i++) {
+        el_http_pool_slot_t *s = &g_http_pool[i];
+        if (!s->valid) {
+            target = i;
+            break;
+        }
+        if (s->lru_seq < oldest_seq) {
+            oldest_seq = s->lru_seq;
+            oldest_idx = i;
+        }
+    }
+    if (target < 0) {
+        target = oldest_idx;
+        evicted = g_http_pool[target].conn;
+    }
+    el_http_pool_slot_t *slot = &g_http_pool[target];
+    strncpy(slot->key, key, sizeof(slot->key) - 1);
+    slot->key[sizeof(slot->key) - 1] = '\0';
+    slot->conn = c;
+    slot->last_used = now;
+    slot->lru_seq = ++g_http_pool_lru_clock;
+    slot->valid = YES;
+    pthread_mutex_unlock(&g_http_pool_lock);
+
+    if (evicted) {
+        el_conn_destroy(evicted);
+    }
+}
+
+static void el_http_pool_clear_all(void) {
+    el_conn_t *toClose[EL_HTTP_POOL_SLOTS];
+    int closeCount = 0;
+    pthread_mutex_lock(&g_http_pool_lock);
+    for (int i = 0; i < EL_HTTP_POOL_SLOTS; i++) {
+        if (g_http_pool[i].valid && g_http_pool[i].conn) {
+            toClose[closeCount++] = g_http_pool[i].conn;
+        }
+        g_http_pool[i].conn = NULL;
+        g_http_pool[i].valid = NO;
+    }
+    pthread_mutex_unlock(&g_http_pool_lock);
+
+    for (int i = 0; i < closeCount; i++) {
+        el_conn_destroy(toClose[i]);
+    }
+}
+
 static int el_set_socket_opts(int fd, int timeout_sec) {
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
@@ -667,39 +879,181 @@ static int el_set_socket_opts(int fd, int timeout_sec) {
     return 0;
 }
 
-static int el_connect_validated_tcp(const char *host, const char *port, NSString **errOut) {
-    struct addrinfo hints, *res = NULL, *p = NULL;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
+static int el_connect_sockaddr_timeout(const struct sockaddr *sa, socklen_t salen, int connect_timeout_sec) {
+    if (!sa || !el_is_public_sockaddr(sa)) return -1;
+    int fd = socket(sa->sa_family, SOCK_STREAM, IPPROTO_TCP);
+    if (fd < 0) return -1;
 
-    if (getaddrinfo(host, port, &hints, &res) != 0 || !res) {
-        if (errOut) *errOut = [NSString stringWithFormat:@"DNS lookup failed for %s", host];
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+
+    int origFlags = fcntl(fd, F_GETFL, 0);
+    if (origFlags >= 0) {
+        fcntl(fd, F_SETFL, origFlags | O_NONBLOCK);
+    }
+
+    int rc = connect(fd, sa, salen);
+    if (rc < 0 && errno == EINPROGRESS && fd < FD_SETSIZE) {
+        fd_set wfds;
+        struct timeval tv;
+        tv.tv_sec = connect_timeout_sec;
+        tv.tv_usec = 0;
+        do {
+            FD_ZERO(&wfds);
+            FD_SET(fd, &wfds);
+            rc = select(fd + 1, NULL, &wfds, NULL, &tv);
+        } while (rc < 0 && errno == EINTR);
+
+        if (rc > 0) {
+            int so_err = 0;
+            socklen_t so_len = sizeof(so_err);
+            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_err, &so_len) == 0 && so_err == 0) {
+                rc = 0;
+            } else {
+                rc = -1;
+            }
+        } else {
+            rc = -1;
+        }
+    }
+
+    if (rc != 0) {
+        close(fd);
         return -1;
     }
 
+    if (origFlags >= 0) {
+        fcntl(fd, F_SETFL, origFlags & ~O_NONBLOCK);
+    }
+    el_set_socket_opts(fd, 15);
+    return fd;
+}
+
+static BOOL el_dns_cache_lookup(const char *host, const char *port, struct sockaddr_storage *outAddr, socklen_t *outLen) {
+    char key[128];
+    snprintf(key, sizeof(key), "%s:%s", host ? host : "", port ? port : "443");
+    time_t now = time(NULL);
+    BOOL hit = NO;
+
+    pthread_mutex_lock(&g_dns_lock);
+    for (int i = 0; i < EL_DNS_CACHE_SLOTS; i++) {
+        el_dns_cache_slot_t *s = &g_dns_cache[i];
+        if (s->valid && strcmp(s->key, key) == 0) {
+            if (now >= s->saved_at && (now - s->saved_at) <= EL_DNS_CACHE_TTL_SEC) {
+                *outAddr = s->addr;
+                *outLen = s->addrlen;
+                s->lru_seq = ++g_dns_lru_clock;
+                hit = YES;
+            } else {
+                s->valid = NO;
+            }
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_dns_lock);
+    return hit;
+}
+
+static void el_dns_cache_evict(const char *host, const char *port) {
+    char key[128];
+    snprintf(key, sizeof(key), "%s:%s", host ? host : "", port ? port : "443");
+    pthread_mutex_lock(&g_dns_lock);
+    for (int i = 0; i < EL_DNS_CACHE_SLOTS; i++) {
+        if (g_dns_cache[i].valid && strcmp(g_dns_cache[i].key, key) == 0) {
+            g_dns_cache[i].valid = NO;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_dns_lock);
+}
+
+static void el_dns_cache_store(const char *host, const char *port, const struct sockaddr *sa, socklen_t salen) {
+    if (!sa || salen == 0 || salen > sizeof(struct sockaddr_storage)) return;
+    char key[128];
+    snprintf(key, sizeof(key), "%s:%s", host ? host : "", port ? port : "443");
+    time_t now = time(NULL);
+
+    pthread_mutex_lock(&g_dns_lock);
+    int target = -1;
+    uint64_t oldest_seq = UINT64_MAX;
+    int oldest_idx = 0;
+    for (int i = 0; i < EL_DNS_CACHE_SLOTS; i++) {
+        el_dns_cache_slot_t *s = &g_dns_cache[i];
+        if (s->valid && strcmp(s->key, key) == 0) {
+            target = i;
+            break;
+        }
+        if (!s->valid && target < 0) target = i;
+        if (s->valid && s->lru_seq < oldest_seq) {
+            oldest_seq = s->lru_seq;
+            oldest_idx = i;
+        }
+    }
+    if (target < 0) target = oldest_idx;
+    el_dns_cache_slot_t *slot = &g_dns_cache[target];
+    strncpy(slot->key, key, sizeof(slot->key) - 1);
+    slot->key[sizeof(slot->key) - 1] = '\0';
+    memset(&slot->addr, 0, sizeof(slot->addr));
+    memcpy(&slot->addr, sa, salen);
+    slot->addrlen = salen;
+    slot->saved_at = now;
+    slot->lru_seq = ++g_dns_lru_clock;
+    slot->valid = YES;
+    pthread_mutex_unlock(&g_dns_lock);
+}
+
+static int el_connect_validated_tcp(const char *host, const char *port, NSString **errOut) {
+    /* 1. Fast path: 0ms DNS cache hit (re-validates public IP before connect) */
+    struct sockaddr_storage cachedAddr;
+    socklen_t cachedLen = 0;
+    if (el_dns_cache_lookup(host, port, &cachedAddr, &cachedLen)) {
+        int cfd = el_connect_sockaddr_timeout((const struct sockaddr *)&cachedAddr, cachedLen, 5);
+        if (cfd >= 0) return cfd;
+        el_dns_cache_evict(host, port);
+    }
+
+    /* 2. Prefer AF_INET (IPv4) first to avoid iOS 4.1 IPv6 blackhole/timeout stalls;
+       fall back to AF_INET6 only if IPv4 yields no connectable public address. */
+    static const int kFamilies[2] = { AF_INET, AF_INET6 };
     int fd = -1;
     BOOL blockedPrivate = NO;
-    for (p = res; p; p = p->ai_next) {
-        if (!el_is_public_sockaddr(p->ai_addr)) {
-            blockedPrivate = YES;
+    BOOL anyResolved = NO;
+
+    for (int f = 0; f < 2 && fd < 0; f++) {
+        struct addrinfo hints, *res = NULL, *p = NULL;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = kFamilies[f];
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_protocol = IPPROTO_TCP;
+
+        if (getaddrinfo(host, port, &hints, &res) != 0 || !res) {
             continue;
         }
-        fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-        if (fd < 0) continue;
-        el_set_socket_opts(fd, 20);
-        if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) break;
-        close(fd);
-        fd = -1;
+        anyResolved = YES;
+
+        for (p = res; p; p = p->ai_next) {
+            if (!el_is_public_sockaddr(p->ai_addr)) {
+                blockedPrivate = YES;
+                continue;
+            }
+            fd = el_connect_sockaddr_timeout(p->ai_addr, p->ai_addrlen, 6);
+            if (fd >= 0) {
+                el_dns_cache_store(host, port, p->ai_addr, p->ai_addrlen);
+                break;
+            }
+        }
+        freeaddrinfo(res);
     }
-    freeaddrinfo(res);
 
     if (fd < 0) {
         if (errOut) {
-            *errOut = blockedPrivate
-                ? [NSString stringWithFormat:@"Blocked private/non-public IP address for %s", host]
-                : [NSString stringWithFormat:@"TCP connect failed to %s:%s", host, port];
+            if (!anyResolved) {
+                *errOut = [NSString stringWithFormat:@"DNS lookup failed for %s", host];
+            } else if (blockedPrivate) {
+                *errOut = [NSString stringWithFormat:@"Blocked private/non-public IP address for %s", host];
+            } else {
+                *errOut = [NSString stringWithFormat:@"TCP connect failed to %s:%s", host, port];
+            }
         }
         return -1;
     }
@@ -720,63 +1074,90 @@ static int el_conn_open(el_conn_t *c, const char *host, const char *port, int is
         return -1;
     }
 
-    mbedtls_net_init(&c->net);
-    mbedtls_ssl_init(&c->ssl);
+    for (int hsAttempt = 0; hsAttempt < 2; hsAttempt++) {
+        memset(&c->vrfy_ctx, 0, sizeof(c->vrfy_ctx));
+        mbedtls_net_init(&c->net);
+        mbedtls_ssl_init(&c->ssl);
 
-    int tcp_fd = el_connect_validated_tcp(host, port, errOut);
-    if (tcp_fd < 0) {
-        el_conn_close(c);
-        return -1;
-    }
-    c->net.fd = tcp_fd;
-
-    int ret = mbedtls_ssl_setup(&c->ssl, &g_ssl_conf);
-    if (ret != 0) {
-        if (errOut) *errOut = [NSString stringWithFormat:@"TLS setup failed (%d)", ret];
-        el_conn_close(c);
-        return -1;
-    }
-
-    mbedtls_ssl_set_verify(&c->ssl, el_tls_verify_cb, &c->vrfy_ctx);
-
-    ret = mbedtls_ssl_set_hostname(&c->ssl, host);
-    if (ret != 0) {
-        if (errOut) *errOut = [NSString stringWithFormat:@"SNI failed (%d)", ret];
-        el_conn_close(c);
-        return -1;
-    }
-
-    /* Attempt 1-RTT TLS 1.2 session ticket/ID resumption if cached and clock is already synced */
-    BOOL usedCachedSession = el_tls_session_apply(&c->ssl, host, port);
-
-    mbedtls_ssl_set_bio(&c->ssl, &c->net, mbedtls_net_send, mbedtls_net_recv, NULL);
-
-    while ((ret = mbedtls_ssl_handshake(&c->ssl)) != 0) {
-        if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
-            if (usedCachedSession) {
-                el_tls_session_evict(host, port);
-            }
-            char ebuf[128];
-            mbedtls_strerror(ret, ebuf, sizeof(ebuf));
-            if (errOut) *errOut = [NSString stringWithFormat:@"TLS handshake failed: %s (-0x%x)", ebuf, -ret];
+        int tcp_fd = el_connect_validated_tcp(host, port, errOut);
+        if (tcp_fd < 0) {
             el_conn_close(c);
             return -1;
         }
+        c->net.fd = tcp_fd;
+
+        int ret = mbedtls_ssl_setup(&c->ssl, &g_ssl_conf);
+        if (ret != 0) {
+            if (errOut) *errOut = [NSString stringWithFormat:@"TLS setup failed (%d)", ret];
+            el_conn_close(c);
+            return -1;
+        }
+
+        mbedtls_ssl_set_verify(&c->ssl, el_tls_verify_cb, &c->vrfy_ctx);
+
+        ret = mbedtls_ssl_set_hostname(&c->ssl, host);
+        if (ret != 0) {
+            if (errOut) *errOut = [NSString stringWithFormat:@"SNI failed (%d)", ret];
+            el_conn_close(c);
+            return -1;
+        }
+
+        /* Attempt 1-RTT TLS 1.2 session ticket/ID resumption on first attempt when synced */
+        BOOL usedCachedSession = (hsAttempt == 0) ? el_tls_session_apply(&c->ssl, host, port) : NO;
+
+        mbedtls_ssl_set_bio(&c->ssl, &c->net, mbedtls_net_send, mbedtls_net_recv, NULL);
+
+        while ((ret = mbedtls_ssl_handshake(&c->ssl)) != 0) {
+            if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
+                break;
+            }
+        }
+
+        if (ret != 0) {
+            uint32_t vf = mbedtls_ssl_get_verify_result(&c->ssl);
+            if (usedCachedSession && hsAttempt == 0) {
+                /* Server may have rotated session ticket keys; transparently retry full handshake */
+                el_tls_session_evict(host, port);
+                el_conn_close(c);
+                continue;
+            }
+            char ebuf[128];
+            mbedtls_strerror(ret, ebuf, sizeof(ebuf));
+            if (errOut) {
+                if (vf != 0) {
+                    *errOut = [NSString stringWithFormat:@"TLS handshake failed (%s): %s (-0x%x, vrfy=0x%x)",
+                               host, ebuf, -ret, (unsigned int)vf];
+                } else {
+                    *errOut = [NSString stringWithFormat:@"TLS handshake failed (%s): %s (-0x%x)",
+                               host, ebuf, -ret];
+                }
+            }
+            el_conn_close(c);
+            return -1;
+        }
+
+        uint32_t verifyFlags = mbedtls_ssl_get_verify_result(&c->ssl);
+        if (verifyFlags != 0) {
+            el_tls_session_evict(host, port);
+            if (usedCachedSession && hsAttempt == 0) {
+                el_conn_close(c);
+                continue;
+            }
+            if (errOut) *errOut = [NSString stringWithFormat:@"TLS certificate verification failed (%s, 0x%08x)",
+                                   host, (unsigned int)verifyFlags];
+            el_conn_close(c);
+            return -1;
+        }
+
+        /* Never cache TLS sessions from a clock-bootstrap handshake (Flaw #12) */
+        if (!c->vrfy_ctx.used_clock_bootstrap) {
+            el_tls_session_save(&c->ssl, host, port);
+        }
+        return 0;
     }
 
-    uint32_t verifyFlags = mbedtls_ssl_get_verify_result(&c->ssl);
-    if (verifyFlags != 0) {
-        el_tls_session_evict(host, port);
-        if (errOut) *errOut = [NSString stringWithFormat:@"TLS certificate verification failed (0x%08x)", (unsigned int)verifyFlags];
-        el_conn_close(c);
-        return -1;
-    }
-
-    /* Never cache TLS sessions from a clock-bootstrap handshake (Flaw #12) */
-    if (!c->vrfy_ctx.used_clock_bootstrap) {
-        el_tls_session_save(&c->ssl, host, port);
-    }
-    return 0;
+    if (errOut) *errOut = @"TLS handshake failed after retry";
+    return -1;
 }
 
 static int el_conn_write_all(el_conn_t *c, const uint8_t *buf, size_t len) {
@@ -915,13 +1296,15 @@ static BOOL el_read_headers(el_conn_t *c,
         BOOL hasValidDate = el_parse_http_date([headers objectForKey:@"date"], &serverEpoch);
         if (c->vrfy_ctx.used_clock_bootstrap) {
             if (!hasValidDate || !c->vrfy_ctx.saw_cert ||
+                serverEpoch < (el_clock_high_water() - EL_CERT_CLOCK_SKEW_TOLERANCE) ||
                 serverEpoch < (c->vrfy_ctx.max_valid_from - EL_CERT_CLOCK_SKEW_TOLERANCE) ||
-                serverEpoch > (c->vrfy_ctx.min_valid_to + EL_CERT_CLOCK_SKEW_TOLERANCE)) {
+                serverEpoch > (c->vrfy_ctx.min_valid_to + EL_CERT_CLOCK_SKEW_TOLERANCE) ||
+                !el_update_clock_from_server_epoch(serverEpoch)) {
                 el_tls_session_evict(host, port);
                 if (errOut) *errOut = @"TLS certificate validity check failed against server Date header";
                 return NO;
             }
-            el_update_clock_from_server_epoch(serverEpoch);
+            c->vrfy_ctx.used_clock_bootstrap = 0;
             el_tls_session_save(&c->ssl, host, port);
         } else if (hasValidDate) {
             BOOL alreadySynced = NO;
@@ -1027,6 +1410,7 @@ static BOOL el_file_dl_chunk_cb(const uint8_t *bytes, NSUInteger length, long lo
         mbedtls_ssl_conf_ca_chain(&g_ssl_conf, &g_ca_chain, NULL);
     }
     pthread_mutex_unlock(&g_tls_init_lock);
+    el_http_pool_clear_all();
     el_tls_sessions_clear_all();
     return YES;
 }
@@ -1094,16 +1478,9 @@ static BOOL el_file_dl_chunk_cb(const uint8_t *bytes, NSUInteger length, long lo
             initialCategory = el_category_for_host(host);
         }
 
-        el_conn_t conn;
-        NSString *openErr = nil;
-        if (el_conn_open(&conn, [host UTF8String], [port UTF8String], 1, &openErr) != 0) {
-            if (outError) *outError = openErr;
-            return NO;
-        }
-
         NSMutableString *req = [NSMutableString stringWithFormat:@"%@ %@ HTTP/1.1\r\n", currentMethod, pq];
         [req appendFormat:@"Host: %@\r\n", host];
-        [req appendString:@"Connection: close\r\n"];
+        [req appendString:@"Connection: keep-alive\r\n"];
 
         BOOL hasUA = NO;
         BOOL hasCL = NO;
@@ -1123,21 +1500,63 @@ static BOOL el_file_dl_chunk_cb(const uint8_t *bytes, NSUInteger length, long lo
         [req appendString:@"\r\n"];
 
         NSData *reqHdrData = [req dataUsingEncoding:NSUTF8StringEncoding];
-        if (el_conn_write_all(&conn, (const uint8_t *)[reqHdrData bytes], [reqHdrData length]) != 0 ||
-            (currentBody && [currentBody length] > 0 &&
-             el_conn_write_all(&conn, (const uint8_t *)[currentBody bytes], [currentBody length]) != 0)) {
-            el_conn_close(&conn);
-            if (outError) *outError = @"Failed sending HTTP request";
-            return NO;
-        }
+        const char *hostCStr = [host UTF8String];
+        const char *portCStr = [port UTF8String];
 
+        el_conn_t *conn = NULL;
         NSInteger status = 0;
-        NSMutableDictionary *respHeaders = [NSMutableDictionary dictionary];
-        NSMutableData *leftover = [NSMutableData data];
+        NSMutableDictionary *respHeaders = nil;
+        NSMutableData *leftover = nil;
         NSString *hdrErr = nil;
-        if (!el_read_headers(&conn, [host UTF8String], [port UTF8String], &status, respHeaders, leftover, &hdrErr)) {
-            el_conn_close(&conn);
-            if (outError) *outError = hdrErr;
+        BOOL gotHeaders = NO;
+
+        for (int attempt = 0; attempt < 2; attempt++) {
+            BOOL fromPool = NO;
+            if (attempt == 0) {
+                conn = el_http_pool_checkout(hostCStr, portCStr);
+                if (conn) fromPool = YES;
+            }
+            if (!conn) {
+                conn = (el_conn_t *)calloc(1, sizeof(el_conn_t));
+                if (!conn) {
+                    if (outError) *outError = @"Out of memory allocating TLS connection";
+                    return NO;
+                }
+                NSString *openErr = nil;
+                if (el_conn_open(conn, hostCStr, portCStr, 1, &openErr) != 0) {
+                    free(conn);
+                    conn = NULL;
+                    if (outError) *outError = openErr;
+                    return NO;
+                }
+            }
+
+            if (el_conn_write_all(conn, (const uint8_t *)[reqHdrData bytes], [reqHdrData length]) != 0 ||
+                (currentBody && [currentBody length] > 0 &&
+                 el_conn_write_all(conn, (const uint8_t *)[currentBody bytes], [currentBody length]) != 0)) {
+                el_conn_destroy(conn);
+                conn = NULL;
+                if (fromPool && attempt == 0) continue;
+                if (outError) *outError = @"Failed sending HTTP request";
+                return NO;
+            }
+
+            respHeaders = [NSMutableDictionary dictionary];
+            leftover = [NSMutableData data];
+            hdrErr = nil;
+            if (!el_read_headers(conn, hostCStr, portCStr, &status, respHeaders, leftover, &hdrErr)) {
+                el_conn_destroy(conn);
+                conn = NULL;
+                if (fromPool && attempt == 0) continue;
+                if (outError) *outError = hdrErr;
+                return NO;
+            }
+            gotHeaders = YES;
+            break;
+        }
+        if (!gotHeaders || !conn) {
+            if (conn) el_conn_destroy(conn);
+            if (outError) *outError = hdrErr ? hdrErr : @"Failed reading HTTP headers";
             return NO;
         }
 
@@ -1145,7 +1564,8 @@ static BOOL el_file_dl_chunk_cb(const uint8_t *bytes, NSUInteger length, long lo
         if ((status == 301 || status == 302 || status == 303 || status == 307 || status == 308) &&
             [respHeaders objectForKey:@"location"]) {
             NSString *loc = [respHeaders objectForKey:@"location"];
-            el_conn_close(&conn);
+            el_conn_destroy(conn);
+            conn = NULL;
 
             /* Disallow redirects on OAuth token/code/revoke POST requests */
             if (initialCategory == ELHostCategoryGoogleAuth && [currentMethod isEqualToString:@"POST"]) {
@@ -1208,7 +1628,7 @@ static BOOL el_file_dl_chunk_cb(const uint8_t *bytes, NSUInteger length, long lo
         if (clStr) {
             contentLen = [clStr longLongValue];
             if (contentLen < 0) {
-                el_conn_close(&conn);
+                el_conn_destroy(conn);
                 if (outError) *outError = @"Invalid negative Content-Length";
                 return NO;
             }
@@ -1217,15 +1637,22 @@ static BOOL el_file_dl_chunk_cb(const uint8_t *bytes, NSUInteger length, long lo
 
         NSString *te = [[respHeaders objectForKey:@"transfer-encoding"] lowercaseString];
         BOOL isChunked = (te && [te rangeOfString:@"chunked"].location != NSNotFound);
+        NSString *connHdr = [[respHeaders objectForKey:@"connection"] lowercaseString];
+        BOOL peerWantsClose = (connHdr && [connHdr rangeOfString:@"close"].location != NSNotFound);
+        BOOL noBodyResponse = ([currentMethod isEqualToString:@"HEAD"] || status == 204 || status == 304);
 
         BOOL aborted = NO;
         BOOL transferError = NO;
+        BOOL canReuse = NO;
         NSString *transferErrMsg = nil;
         uint8_t rbuf[16384];
 
-        if (isChunked) {
+        if (noBodyResponse) {
+            canReuse = ([leftover length] == 0);
+        } else if (isChunked) {
             NSMutableData *cbuf = [NSMutableData dataWithData:leftover];
             BOOL done = NO;
+            BOOL trailersClean = NO;
             while (!done && !aborted && !transferError) {
                 /* Ensure we have a chunk size line (\r\n) within 256 bytes (Flaw #10) */
                 NSUInteger crlf = NSNotFound;
@@ -1241,7 +1668,7 @@ static BOOL el_file_dl_chunk_cb(const uint8_t *bytes, NSUInteger length, long lo
                             transferErrMsg = @"HTTP chunk header line too long";
                             break;
                         }
-                        int n = el_conn_read(&conn, rbuf, sizeof(rbuf));
+                        int n = el_conn_read(conn, rbuf, sizeof(rbuf));
                         if (n <= 0) {
                             transferError = YES;
                             transferErrMsg = @"Truncated chunked HTTP response";
@@ -1278,6 +1705,29 @@ static BOOL el_file_dl_chunk_cb(const uint8_t *bytes, NSUInteger length, long lo
 
                 if (chunkSize == 0) {
                     done = YES;
+                    /* Drain terminating \r\n (and any optional trailer lines) so socket stays aligned for keep-alive */
+                    for (int tline = 0; tline < 32; tline++) {
+                        NSUInteger tcrlf = NSNotFound;
+                        while (tcrlf == NSNotFound) {
+                            const char *tp = (const char *)[cbuf bytes];
+                            NSUInteger tl = [cbuf length];
+                            for (NSUInteger i = 0; i + 1 < tl; i++) {
+                                if (tp[i] == '\r' && tp[i+1] == '\n') { tcrlf = i; break; }
+                            }
+                            if (tcrlf == NSNotFound) {
+                                if (tl > 4096) break;
+                                int n = el_conn_read(conn, rbuf, sizeof(rbuf));
+                                if (n <= 0) break;
+                                [cbuf appendBytes:rbuf length:(NSUInteger)n];
+                            }
+                        }
+                        if (tcrlf == NSNotFound) break;
+                        [cbuf replaceBytesInRange:NSMakeRange(0, tcrlf + 2) withBytes:NULL length:0];
+                        if (tcrlf == 0) {
+                            trailersClean = ([cbuf length] == 0);
+                            break;
+                        }
+                    }
                     break;
                 }
 
@@ -1292,7 +1742,7 @@ static BOOL el_file_dl_chunk_cb(const uint8_t *bytes, NSUInteger length, long lo
                         [cbuf replaceBytesInRange:NSMakeRange(0, take) withBytes:NULL length:0];
                         rem -= take;
                     } else {
-                        int n = el_conn_read(&conn, rbuf, (rem < sizeof(rbuf)) ? (size_t)rem : sizeof(rbuf));
+                        int n = el_conn_read(conn, rbuf, (rem < sizeof(rbuf)) ? (size_t)rem : sizeof(rbuf));
                         if (n <= 0) {
                             transferError = YES;
                             transferErrMsg = @"Truncated HTTP chunk payload";
@@ -1309,7 +1759,7 @@ static BOOL el_file_dl_chunk_cb(const uint8_t *bytes, NSUInteger length, long lo
 
                 /* Consume trailing \r\n after chunk data */
                 while ([cbuf length] < 2) {
-                    int n = el_conn_read(&conn, rbuf, sizeof(rbuf));
+                    int n = el_conn_read(conn, rbuf, sizeof(rbuf));
                     if (n <= 0) {
                         transferError = YES;
                         transferErrMsg = @"Truncated HTTP chunk delimiter";
@@ -1330,11 +1780,18 @@ static BOOL el_file_dl_chunk_cb(const uint8_t *bytes, NSUInteger length, long lo
                 transferError = YES;
                 transferErrMsg = @"Truncated chunked HTTP response";
             }
+            if (!aborted && !transferError && done && trailersClean) {
+                canReuse = YES;
+            }
         } else {
             long long received = 0;
+            BOOL leftoverOverflow = NO;
             if ([leftover length] > 0) {
                 NSUInteger take = [leftover length];
-                if (contentLen >= 0 && (long long)take > contentLen) take = (NSUInteger)contentLen;
+                if (contentLen >= 0 && (long long)take > contentLen) {
+                    take = (NSUInteger)contentLen;
+                    leftoverOverflow = YES;
+                }
                 if (callback && !callback((const uint8_t *)[leftover bytes], take, contentLen, userData)) {
                     aborted = YES;
                 }
@@ -1345,7 +1802,7 @@ static BOOL el_file_dl_chunk_cb(const uint8_t *bytes, NSUInteger length, long lo
                 if (contentLen >= 0 && (contentLen - received) < (long long)want) {
                     want = (size_t)(contentLen - received);
                 }
-                int n = el_conn_read(&conn, rbuf, want);
+                int n = el_conn_read(conn, rbuf, want);
                 if (n < 0) {
                     transferError = YES;
                     transferErrMsg = @"Socket read error during HTTP response";
@@ -1364,9 +1821,18 @@ static BOOL el_file_dl_chunk_cb(const uint8_t *bytes, NSUInteger length, long lo
                 transferErrMsg = [NSString stringWithFormat:@"Truncated HTTP response (%lld of %lld bytes)",
                                   received, contentLen];
             }
+            if (!aborted && !transferError && !leftoverOverflow && contentLen >= 0 && received == contentLen) {
+                canReuse = YES;
+            }
         }
 
-        el_conn_close(&conn);
+        if (canReuse && !peerWantsClose && !aborted && !transferError && !conn->vrfy_ctx.used_clock_bootstrap) {
+            el_http_pool_checkin(hostCStr, portCStr, conn);
+            conn = NULL;
+        } else {
+            el_conn_destroy(conn);
+            conn = NULL;
+        }
         if (transferError) {
             if (outError) *outError = transferErrMsg ? transferErrMsg : @"HTTP transfer failed";
             return NO;

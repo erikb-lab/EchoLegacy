@@ -16,11 +16,12 @@
 #define MBEDTLS_THREADING_C
 #define MBEDTLS_THREADING_PTHREAD
 
-/* 2. ARM1176JZF-S (16 KB L1 I-cache / 16 KB L1 D-cache) table & code footprint optimizations */
+/* 2. ARM1176JZF-S speed & RAM balance: ROM AES tables (saves RAM without slowing AES),
+      full-speed SHA-256/SHA-512 (no _SMALLER slowdown), and fast NIST/fixed-point ECC */
 #define MBEDTLS_AES_ROM_TABLES
-#define MBEDTLS_AES_FEWER_TABLES
-#define MBEDTLS_SHA256_SMALLER
-#define MBEDTLS_SHA512_SMALLER
+#define MBEDTLS_ECP_NIST_OPTIM
+#define MBEDTLS_ECP_FIXED_POINT_OPTIM           1
+#define MBEDTLS_ECP_WINDOW_SIZE                 4
 
 /* 3. Client-only TLS 1.2: disable TLS server, DTLS, and legacy SSLv3/TLS 1.0/1.1 */
 #undef  MBEDTLS_SSL_SRV_C

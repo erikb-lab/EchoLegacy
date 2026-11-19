@@ -196,7 +196,7 @@
 
 - (void)loadMoodWorker:(NSDictionary *)args {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
-    [NSThread setThreadPriority:0.25];
+    [NSThread setThreadPriority:0.55];
     NSString *mood = [args objectForKey:@"mood"];
     NSNumber *tok = [args objectForKey:@"token"];
     NSString *err = nil;

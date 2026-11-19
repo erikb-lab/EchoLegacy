@@ -8,6 +8,8 @@
     UILabel *_hintLabel;
     NSArray *_results;
     NSMutableArray *_recentQueries;
+    NSMutableDictionary *_searchCache;
+    NSMutableArray *_searchCacheLRU;
     BOOL _showingHistory;
     NSInteger _searchToken;
 }

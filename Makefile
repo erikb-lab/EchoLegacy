@@ -63,7 +63,7 @@ $(OBJ_DIR)/el_fmp4_adts.o: src/el_fmp4_adts.c src/el_fmp4_adts.h | $(OBJ_DIR)
 	$(CC) $(CFLAGS) -O2 -c $< -o $@
 
 $(OBJ_DIR)/cJSON.o: $(CJSON_DIR)/cJSON.c $(CJSON_DIR)/cJSON.h | $(OBJ_DIR)
-	$(CC) $(CFLAGS) -Wno-sign-compare -c $< -o $@
+	$(CC) $(CFLAGS) -O2 -Wno-sign-compare -c $< -o $@
 
 $(OBJ_DIR)/%.o: src/%.m | $(OBJ_DIR)
 	$(CC) $(OBJCFLAGS) -c $< -o $@
@@ -72,7 +72,7 @@ third_party/build/libmbedtls.a: $(MBED_INC)/mbedtls/el_user_config.h
 	$(MAKE) -C $(MBED_DIR)/library clean
 	$(MAKE) -C $(MBED_DIR)/library static \
 		CC="$(CC)" AR="$(AR)" RL="$(RANLIB)" APPLE_BUILD=0 \
-		CFLAGS="$(ARCH_FLAGS) -Os -fvisibility=hidden -ffunction-sections -fdata-sections -DMBEDTLS_USER_CONFIG_FILE=\\\"mbedtls/el_user_config.h\\\""
+		CFLAGS="$(ARCH_FLAGS) -O2 -fvisibility=hidden -ffunction-sections -fdata-sections -DMBEDTLS_USER_CONFIG_FILE=\\\"mbedtls/el_user_config.h\\\""
 	mkdir -p third_party/build
 	cp -f $(MBED_DIR)/library/libmbedtls.a $(MBED_DIR)/library/libmbedx509.a $(MBED_DIR)/library/libmbedcrypto.a third_party/build/
 

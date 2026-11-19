@@ -176,11 +176,19 @@ static NSInteger el_compare_cache_entry_mtime(id a, id b, void *ctx) {
 }
 
 - (void)enforceDiskCacheQuota {
+    BOOL shouldRun = NO;
     @synchronized(self) {
-        NSFileManager *fm = [[[NSFileManager alloc] init] autorelease];
-        NSArray *files = [fm contentsOfDirectoryAtPath:_diskDir error:nil];
-        if ([files count] == 0) return;
+        if (!_isPruningDiskCache) {
+            _isPruningDiskCache = YES;
+            shouldRun = YES;
+        }
+    }
+    if (!shouldRun) return;
 
+    /* Run directory scan & lstat outside @synchronized(self) so UI/thumbnail reads never stall */
+    NSFileManager *fm = [[[NSFileManager alloc] init] autorelease];
+    NSArray *files = [fm contentsOfDirectoryAtPath:_diskDir error:nil];
+    if ([files count] > 0) {
         unsigned long long total = 0;
         NSMutableArray *entries = [NSMutableArray arrayWithCapacity:[files count]];
         for (NSString *f in files) {
@@ -196,17 +204,21 @@ static NSInteger el_compare_cache_entry_mtime(id a, id b, void *ctx) {
                                     nil]];
             }
         }
-        if (total <= EL_MAX_DISK_CACHE_BYTES) return;
-
-        [entries sortUsingFunction:el_compare_cache_entry_mtime context:NULL];
-        for (NSDictionary *entry in entries) {
-            if (total <= EL_DISK_CACHE_TARGET) break;
-            NSString *p = [entry objectForKey:@"path"];
-            unsigned long long sz = [[entry objectForKey:@"size"] unsignedLongLongValue];
-            if (unlink([p UTF8String]) == 0) {
-                total = (total > sz) ? (total - sz) : 0;
+        if (total > EL_MAX_DISK_CACHE_BYTES) {
+            [entries sortUsingFunction:el_compare_cache_entry_mtime context:NULL];
+            for (NSDictionary *entry in entries) {
+                if (total <= EL_DISK_CACHE_TARGET) break;
+                NSString *p = [entry objectForKey:@"path"];
+                unsigned long long sz = [[entry objectForKey:@"size"] unsignedLongLongValue];
+                if (unlink([p UTF8String]) == 0) {
+                    total = (total > sz) ? (total - sz) : 0;
+                }
             }
         }
+    }
+
+    @synchronized(self) {
+        _isPruningDiskCache = NO;
     }
 }
 
@@ -285,7 +297,17 @@ static NSInteger el_compare_cache_entry_mtime(id a, id b, void *ctx) {
         }
         if (path) {
             [resp.body writeToFile:path atomically:YES];
-            [self enforceDiskCacheQuota];
+            BOOL triggerPrune = NO;
+            @synchronized(self) {
+                _diskWritesSincePrune++;
+                if (_diskWritesSincePrune >= 25) {
+                    _diskWritesSincePrune = 0;
+                    triggerPrune = YES;
+                }
+            }
+            if (triggerPrune) {
+                [self enforceDiskCacheQuota];
+            }
         }
         [self storeInMemory:decoded forKey:urlString];
         return resp.body;

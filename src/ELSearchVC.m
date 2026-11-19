@@ -51,6 +51,8 @@ static void el_save_history_array(NSArray *queries) {
                                                            tag:1] autorelease];
         _results = [[NSArray alloc] init];
         _recentQueries = [[NSMutableArray alloc] init];
+        _searchCache = [[NSMutableDictionary alloc] initWithCapacity:8];
+        _searchCacheLRU = [[NSMutableArray alloc] initWithCapacity:8];
         NSString *histPath = el_history_path();
         if ([[NSFileManager defaultManager] fileExistsAtPath:histPath]) {
             el_harden_history_path(histPath, 0600, NO);
@@ -67,6 +69,12 @@ static void el_save_history_array(NSArray *queries) {
         _showingHistory = YES;
     }
     return self;
+}
+
+- (void)didReceiveMemoryWarning {
+    [_searchCache removeAllObjects];
+    [_searchCacheLRU removeAllObjects];
+    [super didReceiveMemoryWarning];
 }
 
 - (void)releaseViewOutlets {
@@ -87,6 +95,8 @@ static void el_save_history_array(NSArray *queries) {
     [self releaseViewOutlets];
     [_results release];
     [_recentQueries release];
+    [_searchCache release];
+    [_searchCacheLRU release];
     [super dealloc];
 }
 
@@ -201,9 +211,16 @@ static void el_save_history_array(NSArray *queries) {
     }
 }
 
+- (void)saveHistoryBg:(NSArray *)snapshot {
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    [NSThread setThreadPriority:0.15];
+    el_save_history_array(snapshot);
+    [pool release];
+}
+
 - (void)onClearHistory {
     [_recentQueries removeAllObjects];
-    el_save_history_array(_recentQueries);
+    [NSThread detachNewThreadSelector:@selector(saveHistoryBg:) toTarget:self withObject:[NSArray array]];
     [self updateEmptyHint];
     [_tableView reloadData];
 }
@@ -214,20 +231,34 @@ static void el_save_history_array(NSArray *queries) {
     [_recentQueries removeObject:q];
     [_recentQueries insertObject:q atIndex:0];
     while ([_recentQueries count] > 10) [_recentQueries removeLastObject];
-    el_save_history_array(_recentQueries);
 }
 
 - (void)runSearchForQuery:(NSString *)q {
     if ([q length] == 0) return;
     [self recordQuery:q];
+    NSArray *histSnap = [[_recentQueries copy] autorelease];
     _showingHistory = NO;
     _searchToken++;
     _hintLabel.hidden = YES;
     self.navigationItem.rightBarButtonItem = nil;
+
+    NSString *cacheKey = [q lowercaseString];
+    NSArray *cached = [_searchCache objectForKey:cacheKey];
+    if (cached && [cached count] > 0) {
+        [_spinner stopAnimating];
+        [_results release];
+        _results = [cached retain];
+        [_tableView reloadData];
+        [NSThread detachNewThreadSelector:@selector(saveHistoryBg:) toTarget:self withObject:histSnap];
+        return;
+    }
+
     [_spinner startAnimating];
 
     NSDictionary *args = [NSDictionary dictionaryWithObjectsAndKeys:
                           q, @"query",
+                          cacheKey, @"cacheKey",
+                          histSnap, @"historySnapshot",
                           [NSNumber numberWithInteger:_searchToken], @"token",
                           nil];
     [NSThread detachNewThreadSelector:@selector(searchWorker:) toTarget:self withObject:args];
@@ -260,15 +291,25 @@ static void el_save_history_array(NSArray *queries) {
 
 - (void)searchWorker:(NSDictionary *)args {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
-    [NSThread setThreadPriority:0.25];
+    /* Interactive high priority so search beats background thumbnails & offline downloads */
+    [NSThread setThreadPriority:0.75];
     NSString *q = [args objectForKey:@"query"];
+    NSString *cacheKey = [args objectForKey:@"cacheKey"];
+    NSArray *histSnap = [args objectForKey:@"historySnapshot"];
     NSNumber *tok = [args objectForKey:@"token"];
     NSString *err = nil;
     NSArray *tracks = [[ELYouTubeClient sharedClient] searchSongs:q error:&err];
     NSMutableDictionary *res = [NSMutableDictionary dictionaryWithObject:tok forKey:@"token"];
-    if (tracks) [res setObject:tracks forKey:@"tracks"];
-    if (err)    [res setObject:err forKey:@"error"];
+    if (cacheKey) [res setObject:cacheKey forKey:@"cacheKey"];
+    if (tracks)   [res setObject:tracks forKey:@"tracks"];
+    if (err)      [res setObject:err forKey:@"error"];
     [self performSelectorOnMainThread:@selector(onSearchFinished:) withObject:res waitUntilDone:NO];
+
+    /* Persist history AFTER dispatching results to UI so search latency is never penalized by flash I/O */
+    if (histSnap) {
+        [NSThread setThreadPriority:0.15];
+        el_save_history_array(histSnap);
+    }
     [pool release];
 }
 
@@ -277,10 +318,21 @@ static void el_save_history_array(NSArray *queries) {
     [_spinner stopAnimating];
     NSArray *tracks = [res objectForKey:@"tracks"];
     NSString *err = [res objectForKey:@"error"];
+    NSString *cacheKey = [res objectForKey:@"cacheKey"];
     if (tracks && [tracks count] > 0) {
         [_results release];
         _results = [tracks retain];
         _hintLabel.hidden = YES;
+        if ([cacheKey length] > 0) {
+            [_searchCache setObject:tracks forKey:cacheKey];
+            [_searchCacheLRU removeObject:cacheKey];
+            [_searchCacheLRU addObject:cacheKey];
+            while ([_searchCacheLRU count] > 8) {
+                NSString *evict = [_searchCacheLRU objectAtIndex:0];
+                [_searchCache removeObjectForKey:evict];
+                [_searchCacheLRU removeObjectAtIndex:0];
+            }
+        }
     } else {
         [_results release];
         _results = [[NSArray alloc] init];

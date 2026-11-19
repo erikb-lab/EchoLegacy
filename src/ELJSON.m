@@ -1,9 +1,61 @@
 #import "ELJSON.h"
 #import "cJSON.h"
 #include <stdint.h>
+#include <string.h>
 
 #define EL_MAX_JSON_BYTES (8U * 1024U * 1024U)
 #define EL_MAX_JSON_DEPTH 64
+
+static BOOL el_should_skip_youtube_key(const char *k) {
+    if (!k) return NO;
+    switch (k[0]) {
+        case 'a':
+            return (strcmp(k, "accessibility") == 0 ||
+                    strcmp(k, "accessibilityData") == 0 ||
+                    strcmp(k, "adPlacements") == 0 ||
+                    strcmp(k, "adSlots") == 0 ||
+                    strcmp(k, "annotations") == 0 ||
+                    strcmp(k, "attestation") == 0);
+        case 'b':
+            return (strcmp(k, "badges") == 0);
+        case 'c':
+            return (strcmp(k, "captions") == 0 ||
+                    strcmp(k, "chipCloud") == 0 ||
+                    strcmp(k, "clickTrackingParams") == 0 ||
+                    strcmp(k, "colorPalette") == 0);
+        case 'f':
+            return (strcmp(k, "feedbackToken") == 0 ||
+                    strcmp(k, "frameworkUpdates") == 0);
+        case 'i':
+            return (strcmp(k, "icon") == 0);
+        case 'l':
+            return (strcmp(k, "loggingDirectives") == 0);
+        case 'm':
+            return (strcmp(k, "mainAppWebResponseContext") == 0 ||
+                    strcmp(k, "menu") == 0 ||
+                    strcmp(k, "menuRenderer") == 0 ||
+                    strcmp(k, "microformat") == 0);
+        case 'o':
+            return (strcmp(k, "onTap") == 0);
+        case 'p':
+            return (strcmp(k, "pauseIcon") == 0 ||
+                    strcmp(k, "playIcon") == 0 ||
+                    strcmp(k, "playbackTracking") == 0 ||
+                    strcmp(k, "playerAds") == 0 ||
+                    strcmp(k, "playerConfig") == 0);
+        case 's':
+            return (strcmp(k, "serviceTrackingParams") == 0 ||
+                    strcmp(k, "storyboards") == 0);
+        case 't':
+            return (strcmp(k, "topbar") == 0 ||
+                    strcmp(k, "trackingParams") == 0);
+        case 'w':
+            return (strcmp(k, "watchEndpointMusicSupportedConfigs") == 0 ||
+                    strcmp(k, "webResponseContextExtensionData") == 0);
+        default:
+            return NO;
+    }
+}
 
 static BOOL el_json_check_depth(const uint8_t *buf, size_t len, int maxDepth) {
     if (!buf || len == 0 || len > EL_MAX_JSON_BYTES) return NO;
@@ -34,7 +86,7 @@ static BOOL el_json_check_depth(const uint8_t *buf, size_t len, int maxDepth) {
     return YES;
 }
 
-static id el_objc_from_cjson(const cJSON *item, int depth) {
+static id el_objc_from_cjson(const cJSON *item, int depth, BOOL pruneYouTube) {
     if (depth > EL_MAX_JSON_DEPTH) {
         return nil;
     }
@@ -57,7 +109,7 @@ static id el_objc_from_cjson(const cJSON *item, int depth) {
         NSMutableArray *arr = [NSMutableArray array];
         const cJSON *child = NULL;
         cJSON_ArrayForEach(child, item) {
-            id val = el_objc_from_cjson(child, depth + 1);
+            id val = el_objc_from_cjson(child, depth + 1, pruneYouTube);
             if (val) [arr addObject:val];
         }
         return arr;
@@ -68,9 +120,10 @@ static id el_objc_from_cjson(const cJSON *item, int depth) {
         const cJSON *child = NULL;
         cJSON_ArrayForEach(child, item) {
             if (!child->string) continue;
+            if (pruneYouTube && el_should_skip_youtube_key(child->string)) continue;
             NSString *key = [NSString stringWithUTF8String:child->string];
             if (!key) continue;
-            id val = el_objc_from_cjson(child, depth + 1);
+            id val = el_objc_from_cjson(child, depth + 1, pruneYouTube);
             if (val) [dict setObject:val forKey:key];
         }
         return dict;
@@ -117,16 +170,24 @@ static cJSON *el_cjson_from_objc(id obj, int depth) {
 
 @implementation ELJSON
 
-+ (id)objectWithData:(NSData *)data {
++ (id)objectWithData:(NSData *)data pruneYouTube:(BOOL)pruneYouTube {
     if (!data || [data length] == 0 || [data length] > EL_MAX_JSON_BYTES) return nil;
     if (!el_json_check_depth((const uint8_t *)[data bytes], [data length], EL_MAX_JSON_DEPTH)) {
         return nil;
     }
     cJSON *root = cJSON_ParseWithLength((const char *)[data bytes], [data length]);
     if (!root) return nil;
-    id result = el_objc_from_cjson(root, 0);
+    id result = el_objc_from_cjson(root, 0, pruneYouTube);
     cJSON_Delete(root);
     return result;
+}
+
++ (id)objectWithData:(NSData *)data {
+    return [self objectWithData:data pruneYouTube:NO];
+}
+
++ (id)youtubeObjectWithData:(NSData *)data {
+    return [self objectWithData:data pruneYouTube:YES];
 }
 
 + (id)objectWithString:(NSString *)jsonString {

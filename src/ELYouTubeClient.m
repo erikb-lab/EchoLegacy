@@ -716,7 +716,7 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
         if (outError) *outError = resp.errorMessage;
         return nil;
     }
-    NSDictionary *json = [ELJSON objectWithData:resp.body];
+    NSDictionary *json = [ELJSON youtubeObjectWithData:resp.body];
     if (resp.statusCode >= 400 || ![json isKindOfClass:[NSDictionary class]]) {
         NSDictionary *errObj = [ELJSON dict:json forKey:@"error"];
         NSString *msg = [ELJSON string:errObj forKey:@"message"];
@@ -847,7 +847,7 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
                                                         headers:hdrs
                                                            body:[ELJSON dataWithObject:body]];
     if (resp.statusCode == 200 && resp.body) {
-        NSDictionary *json = [ELJSON objectWithData:resp.body];
+        NSDictionary *json = [ELJSON youtubeObjectWithData:resp.body];
         NSDictionary *rc = [ELJSON dict:json forKey:@"responseContext"];
         NSString *vd = [ELJSON string:rc forKey:@"visitorData"];
         if ([vd length] > 0) {
@@ -931,7 +931,7 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
         if (outError) *outError = resp.errorMessage;
         return nil;
     }
-    NSDictionary *json = [ELJSON objectWithData:resp.body];
+    NSDictionary *json = [ELJSON youtubeObjectWithData:resp.body];
     if (![json isKindOfClass:[NSDictionary class]]) {
         if (outError) *outError = @"Invalid player response";
         return nil;
@@ -1035,7 +1035,7 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
         if (outError) *outError = resp.errorMessage;
         return nil;
     }
-    NSDictionary *json = [ELJSON objectWithData:resp.body];
+    NSDictionary *json = [ELJSON youtubeObjectWithData:resp.body];
     if (resp.statusCode >= 400 || ![json isKindOfClass:[NSDictionary class]]) {
         NSDictionary *errObj = [ELJSON dict:json forKey:@"error"];
         NSString *msg = [ELJSON string:errObj forKey:@"message"];
@@ -1247,7 +1247,7 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
             return NO;
         }
         if (resp.statusCode < 200 || resp.statusCode >= 400) {
-            NSDictionary *json = [ELJSON objectWithData:resp.body];
+            NSDictionary *json = [ELJSON youtubeObjectWithData:resp.body];
             NSDictionary *errObj = [ELJSON dict:json forKey:@"error"];
             NSString *msg = [ELJSON string:errObj forKey:@"message"];
             if (outError) *outError = msg ? msg : [NSString stringWithFormat:@"YouTube Like HTTP %ld", (long)resp.statusCode];
