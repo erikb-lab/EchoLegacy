@@ -19,7 +19,7 @@ MBED_INC    := $(MBED_DIR)/include
 MBED_LIBS   := third_party/build/libmbedtls.a third_party/build/libmbedx509.a third_party/build/libmbedcrypto.a
 CJSON_DIR   := third_party/cjson
 
-ARCH_FLAGS  := -target armv6-apple-darwin10 -arch armv6 -mcpu=arm1176jzf-s \
+ARCH_FLAGS  := -target armv6-apple-darwin10 -arch armv6 -mcpu=arm1176jzf-s -marm \
                -miphoneos-version-min=4.1 \
                -isysroot $(SDK) \
                -B$(TOOLCHAIN)
@@ -64,6 +64,11 @@ $(OBJ_DIR)/el_fmp4_adts.o: src/el_fmp4_adts.c src/el_fmp4_adts.h | $(OBJ_DIR)
 
 $(OBJ_DIR)/cJSON.o: $(CJSON_DIR)/cJSON.c $(CJSON_DIR)/cJSON.h | $(OBJ_DIR)
 	$(CC) $(CFLAGS) -O2 -Wno-sign-compare -c $< -o $@
+
+HOT_M_OBJS  := $(addprefix $(OBJ_DIR)/,ELHTTPClient.o ELTheme.o ELAudioEngine.o ELJSON.o ELYouTubeClient.o)
+
+$(HOT_M_OBJS): $(OBJ_DIR)/%.o: src/%.m | $(OBJ_DIR)
+	$(CC) $(OBJCFLAGS) -O2 -c $< -o $@
 
 $(OBJ_DIR)/%.o: src/%.m | $(OBJ_DIR)
 	$(CC) $(OBJCFLAGS) -c $< -o $@

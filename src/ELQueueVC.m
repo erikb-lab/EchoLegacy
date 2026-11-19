@@ -6,6 +6,7 @@
 #endif
 #import "ELTheme.h"
 #import "ELTrackCell.h"
+#import "ELTrackListHelper.h"
 
 @implementation ELQueueVC
 
@@ -67,7 +68,15 @@
     [nc addObserver:self selector:@selector(onDownloadProgress:) name:ELDownloadProgressNotification object:nil];
 #endif
 
+    _lastQueueCount = NSNotFound;
     [self refresh];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    if (_needsRefresh) {
+        [self refresh];
+    }
 }
 
 - (void)onClose {
@@ -100,12 +109,23 @@
 #endif
 
 - (void)refresh {
+    if (!self.view.window) {
+        _needsRefresh = YES;
+        return;
+    }
+    _needsRefresh = NO;
     ELAudioEngine *eng = [ELAudioEngine sharedEngine];
     NSArray *q = [eng queue];
-    _headerLabel.text = [NSString stringWithFormat:@"Up Next (%lu)", (unsigned long)[q count]];
+    NSUInteger count = [q count];
+    _headerLabel.text = [NSString stringWithFormat:@"Up Next (%lu)", (unsigned long)count];
     UIColor *shufCol = eng.shuffleEnabled ? [ELTheme accentColor] : [ELTheme textSecondaryColor];
     [_shuffleBtn setImage:[ELTheme iconShuffleSize:22.0f color:shufCol] forState:UIControlStateNormal];
-    [_tableView reloadData];
+    if (count != _lastQueueCount) {
+        _lastQueueCount = count;
+        [_tableView reloadData];
+    } else {
+        [ELTrackListHelper refreshVisibleTrackHighlightInTableView:_tableView];
+    }
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {

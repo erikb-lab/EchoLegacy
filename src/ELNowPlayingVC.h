@@ -19,9 +19,9 @@
 >
 #endif
 {
-    CAGradientLayer *_backdropGradient;
-    CAGradientLayer *_topScrimLayer;
-    CAGradientLayer *_artFadeLayer;
+    UIImageView *_backdropView;
+    UIImageView *_topScrimView;
+    UIImageView *_artFadeView;
     UIImageView *_artView;
     UILabel *_sourceBadge;
 #if EL_FEATURE_LYRICS
@@ -59,6 +59,7 @@
 #if EL_FEATURE_LIKES
     UIButton *_likeBtn;
     BOOL _isLiked;
+    NSInteger _lastLikeVisualState;
     NSInteger _likeRequestGen;
     NSString *_inFlightLikeVideoId;
 #endif
@@ -67,12 +68,15 @@
     UILabel *_durationLabel;
     UIButton *_shuffleBtn;
     UIImageView *_shuffleDot;
+    NSInteger _lastShuffleState;
     UIButton *_prevBtn;
     UIButton *_playPauseBtn;
+    NSInteger _lastPlayIconState;
     UIButton *_nextBtn;
     UIButton *_repeatBtn;
     UIImageView *_repeatDot;
     UILabel *_repeatOneBadge;
+    NSInteger _lastRepeatState;
     UIButton *_queueBtn;
 #if EL_FEATURE_DOWNLOADS
     UIButton *_downloadBtn;

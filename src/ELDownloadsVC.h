@@ -8,7 +8,10 @@
 > {
     UITableView *_tableView;
     UILabel *_emptyLabel;
+    UIView *_downloadsHeader;
+    UILabel *_downloadsInfoLabel;
     NSArray *_tracks;
+    BOOL _needsRefresh;
 #if EL_FEATURE_LOCAL_PLAYLISTS
     NSArray *_localPlaylists;
     UIView *_newPlaylistBar;

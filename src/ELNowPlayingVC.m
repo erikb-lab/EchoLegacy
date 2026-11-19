@@ -144,33 +144,26 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
 #endif
 
 - (void)applyBackdropColor:(UIColor *)dominant animated:(BOOL)animated {
-    if (!_backdropGradient || !_artFadeLayer) return;
+    (void)animated;
+    if (!_backdropView || !_artFadeView) return;
     if (!dominant) dominant = [ELTheme dominantBackdropColorFromImage:nil];
     UIColor *darker = [ELTheme darkerShadeOfColor:dominant factor:0.54f];
     UIColor *clearDom = [ELTheme colorWithColor:dominant alpha:0.0f];
-    UIColor *midDom1 = [ELTheme colorWithColor:dominant alpha:0.38f];
-    UIColor *midDom2 = [ELTheme colorWithColor:dominant alpha:0.86f];
+    UIColor *midDom = [ELTheme colorWithColor:dominant alpha:0.62f];
 
     self.view.backgroundColor = dominant;
-
-    [CATransaction begin];
-    if (animated) {
-        [CATransaction setAnimationDuration:0.32];
-    } else {
-        [CATransaction setDisableActions:YES];
-    }
-    _backdropGradient.colors = [NSArray arrayWithObjects:
-                                (id)[dominant CGColor],
-                                (id)[dominant CGColor],
-                                (id)[darker CGColor],
-                                nil];
-    _artFadeLayer.colors = [NSArray arrayWithObjects:
-                            (id)[clearDom CGColor],
-                            (id)[midDom1 CGColor],
-                            (id)[midDom2 CGColor],
-                            (id)[dominant CGColor],
-                            nil];
-    [CATransaction commit];
+    _backdropView.image = [ELTheme verticalGradientImageWithHeight:460.0f
+                                                          topColor:dominant
+                                                          midColor:dominant
+                                                       midLocation:0.58f
+                                                       bottomColor:darker
+                                                            opaque:YES];
+    _artFadeView.image = [ELTheme verticalGradientImageWithHeight:120.0f
+                                                         topColor:clearDom
+                                                         midColor:midDom
+                                                      midLocation:0.56f
+                                                      bottomColor:dominant
+                                                           opaque:NO];
 }
 
 - (void)viewDidLoad {
@@ -182,43 +175,39 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     UIColor *pillLightHi = [UIColor colorWithWhite:1.0f alpha:0.30f];
     UIColor *secondaryWhite = [UIColor colorWithWhite:1.0f alpha:0.74f];
 
-    /* Dynamic dominant-color full-screen vertical gradient backdrop */
-    _backdropGradient = [[CAGradientLayer layer] retain];
-    _backdropGradient.frame = CGRectMake(0.0f, 0.0f, 320.0f, 460.0f);
-    _backdropGradient.locations = [NSArray arrayWithObjects:
-                                   [NSNumber numberWithFloat:0.0f],
-                                   [NSNumber numberWithFloat:0.58f],
-                                   [NSNumber numberWithFloat:1.0f],
-                                   nil];
-    [self.view.layer insertSublayer:_backdropGradient atIndex:0];
+    /* Dynamic dominant-color full-screen vertical gradient backdrop (1xH strip) */
+    _backdropView = [[UIImageView alloc] initWithFrame:CGRectMake(0.0f, 0.0f, 320.0f, 460.0f)];
+    _backdropView.contentMode = UIViewContentModeScaleToFill;
+    _backdropView.opaque = YES;
+    _backdropView.userInteractionEnabled = NO;
+    [self.view addSubview:_backdropView];
 
     /* Full-bleed album art at top (zero dynamic shadowOpacity / zero offscreen cornerRadius FBO) */
     _artView = [[UIImageView alloc] initWithFrame:CGRectMake(0.0f, 0.0f, 320.0f, 268.0f)];
     _artView.contentMode = UIViewContentModeScaleAspectFill;
     _artView.clipsToBounds = YES;
+    _artView.opaque = YES;
     _artView.backgroundColor = [ELTheme surfaceColor];
     _artView.image = [ELTheme placeholderArtImage];
     [self.view addSubview:_artView];
 
     /* Subtle top scrim so translucent circular top pills stay readable over bright covers */
-    _topScrimLayer = [[CAGradientLayer layer] retain];
-    _topScrimLayer.frame = CGRectMake(0.0f, 0.0f, 320.0f, 60.0f);
-    _topScrimLayer.colors = [NSArray arrayWithObjects:
-                             (id)[[UIColor colorWithWhite:0.0f alpha:0.46f] CGColor],
-                             (id)[[UIColor colorWithWhite:0.0f alpha:0.0f] CGColor],
-                             nil];
-    [_artView.layer addSublayer:_topScrimLayer];
+    _topScrimView = [[UIImageView alloc] initWithFrame:CGRectMake(0.0f, 0.0f, 320.0f, 60.0f)];
+    _topScrimView.contentMode = UIViewContentModeScaleToFill;
+    _topScrimView.userInteractionEnabled = NO;
+    _topScrimView.image = [ELTheme verticalGradientImageWithHeight:60.0f
+                                                          topColor:[UIColor colorWithWhite:0.0f alpha:0.46f]
+                                                          midColor:nil
+                                                       midLocation:0.0f
+                                                       bottomColor:[UIColor colorWithWhite:0.0f alpha:0.0f]
+                                                            opaque:NO];
+    [_artView addSubview:_topScrimView];
 
     /* Smooth bottom art fade seamlessly melting into dominant backdrop */
-    _artFadeLayer = [[CAGradientLayer layer] retain];
-    _artFadeLayer.frame = CGRectMake(0.0f, 148.0f, 320.0f, 120.0f);
-    _artFadeLayer.locations = [NSArray arrayWithObjects:
-                               [NSNumber numberWithFloat:0.0f],
-                               [NSNumber numberWithFloat:0.40f],
-                               [NSNumber numberWithFloat:0.78f],
-                               [NSNumber numberWithFloat:1.0f],
-                               nil];
-    [_artView.layer addSublayer:_artFadeLayer];
+    _artFadeView = [[UIImageView alloc] initWithFrame:CGRectMake(0.0f, 148.0f, 320.0f, 120.0f)];
+    _artFadeView.contentMode = UIViewContentModeScaleToFill;
+    _artFadeView.userInteractionEnabled = NO;
+    [_artView addSubview:_artFadeView];
 
     [self applyBackdropColor:[ELTheme dominantBackdropColorFromImage:nil] animated:NO];
 
@@ -264,6 +253,7 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     _lyricsTable.backgroundColor = [UIColor clearColor];
     _lyricsTable.separatorStyle = UITableViewCellSeparatorStyleNone;
     _lyricsTable.showsVerticalScrollIndicator = NO;
+    _lyricsTable.rowHeight = 38.0f;
     _lyricsTable.contentInset = UIEdgeInsetsMake(64.0f, 0.0f, 64.0f, 0.0f);
     _lyricsTable.dataSource = self;
     _lyricsTable.delegate = self;
@@ -436,12 +426,19 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     _repeatOneBadge.hidden = YES;
     [_repeatBtn addSubview:_repeatOneBadge];
 
+#if EL_FEATURE_LIKES
+    _lastLikeVisualState = -1;
+#endif
+    _lastShuffleState = -1;
+    _lastPlayIconState = -1;
+    _lastRepeatState = -1;
+
     NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
     [nc addObserver:self selector:@selector(refreshAll) name:ELPlayerStateChangedNotification object:nil];
-    [nc addObserver:self selector:@selector(refreshProgress) name:ELPlayerProgressNotification object:nil];
+    [nc addObserver:self selector:@selector(onProgressNotification:) name:ELPlayerProgressNotification object:nil];
 #if EL_FEATURE_DOWNLOADS
     [nc addObserver:self selector:@selector(refreshDownloadBtn) name:ELDownloadsChangedNotification object:nil];
-    [nc addObserver:self selector:@selector(refreshDownloadBtn) name:ELDownloadProgressNotification object:nil];
+    [nc addObserver:self selector:@selector(onDownloadProgressNote:) name:ELDownloadProgressNotification object:nil];
 #endif
 #if EL_FEATURE_LIKES
     [nc addObserver:self selector:@selector(onLibraryUpdated) name:ELLibraryUpdatedNotification object:nil];
@@ -468,9 +465,9 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     [_lastTitleText release]; _lastTitleText = nil;
     [_lastArtistText release]; _lastArtistText = nil;
 #endif
-    [_backdropGradient release]; _backdropGradient = nil;
-    [_topScrimLayer release]; _topScrimLayer = nil;
-    [_artFadeLayer release]; _artFadeLayer = nil;
+    [_backdropView release]; _backdropView = nil;
+    [_topScrimView release]; _topScrimView = nil;
+    [_artFadeView release]; _artFadeView = nil;
     [_artView release]; _artView = nil;
     [_sourceBadge release]; _sourceBadge = nil;
 #if EL_FEATURE_LYRICS
@@ -557,6 +554,9 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
 #pragma mark - Like / Unlike Flow
 
 - (void)updateLikeButtonVisual {
+    NSInteger state = _isLiked ? 1 : 0;
+    if (state == _lastLikeVisualState) return;
+    _lastLikeVisualState = state;
     static UIColor *likedBg = nil;
     static UIColor *likedBgHi = nil;
     static UIColor *unlikedBg = nil;
@@ -686,6 +686,13 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     [self refreshDownloadBtn];
 }
 
+- (void)onDownloadProgressNote:(NSNotification *)note {
+    NSString *vid = [[note userInfo] objectForKey:@"videoId"];
+    ELTrack *track = [[ELAudioEngine sharedEngine] currentTrack];
+    if (vid && track && ![vid isEqualToString:track.videoId]) return;
+    [self refreshDownloadBtn];
+}
+
 - (void)refreshDownloadBtn {
     ELTrack *track = [[ELAudioEngine sharedEngine] currentTrack];
     if (!track) return;
@@ -709,11 +716,8 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
 }
 #endif
 
-- (void)refreshProgress {
+- (void)updateProgressWithCurrentTime:(double)cur duration:(double)dur {
     if (![self isViewLoaded] || !self.view.window) return;
-    ELAudioEngine *eng = [ELAudioEngine sharedEngine];
-    double dur = [eng duration];
-    double cur = [eng currentTime];
     NSInteger durSec = (dur > 0.0) ? (NSInteger)dur : 0;
     if (durSec != _lastDisplayedDurationSec) {
         _lastDisplayedDurationSec = durSec;
@@ -737,6 +741,23 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
         [self updateActiveLyricForTime:cur];
     }
 #endif
+}
+
+- (void)onProgressNotification:(NSNotification *)note {
+    NSDictionary *info = [note userInfo];
+    NSNumber *curNum = [info objectForKey:@"currentTime"];
+    NSNumber *durNum = [info objectForKey:@"duration"];
+    if (curNum && durNum) {
+        [self updateProgressWithCurrentTime:[curNum doubleValue] duration:[durNum doubleValue]];
+    } else {
+        [self refreshProgress];
+    }
+}
+
+- (void)refreshProgress {
+    if (![self isViewLoaded] || !self.view.window) return;
+    ELAudioEngine *eng = [ELAudioEngine sharedEngine];
+    [self updateProgressWithCurrentTime:[eng currentTime] duration:[eng duration]];
 }
 
 #if EL_FEATURE_MARQUEE
@@ -863,18 +884,27 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
     if (!dimWhite) dimWhite = [[UIColor colorWithWhite:1.0f alpha:0.46f] retain];
     static UIColor *streamBadgeColor = nil;
     if (!streamBadgeColor) streamBadgeColor = [[UIColor colorWithWhite:1.0f alpha:0.86f] retain];
-    UIColor *shufCol = eng.shuffleEnabled ? [UIColor whiteColor] : dimWhite;
-    [_shuffleBtn setImage:[ELTheme iconShuffleSize:22.0f color:shufCol] forState:UIControlStateNormal];
-    _shuffleDot.hidden = !eng.shuffleEnabled;
 
-    BOOL repActive = (eng.repeatMode != ELRepeatModeOff);
-    UIColor *repCol = repActive ? [UIColor whiteColor] : dimWhite;
-    [_repeatBtn setImage:[ELTheme iconRepeatSize:22.0f color:repCol] forState:UIControlStateNormal];
-    _repeatDot.hidden = !repActive;
-    BOOL repOne = (eng.repeatMode == ELRepeatModeOne);
-    _repeatOneBadge.hidden = !repOne;
-    UIView *repBadgeBg = [_repeatBtn viewWithTag:901];
-    if (repBadgeBg) repBadgeBg.hidden = !repOne;
+    NSInteger shufState = eng.shuffleEnabled ? 1 : 0;
+    if (shufState != _lastShuffleState) {
+        _lastShuffleState = shufState;
+        UIColor *shufCol = eng.shuffleEnabled ? [UIColor whiteColor] : dimWhite;
+        [_shuffleBtn setImage:[ELTheme iconShuffleSize:22.0f color:shufCol] forState:UIControlStateNormal];
+        _shuffleDot.hidden = !eng.shuffleEnabled;
+    }
+
+    NSInteger repState = (NSInteger)eng.repeatMode;
+    if (repState != _lastRepeatState) {
+        _lastRepeatState = repState;
+        BOOL repActive = (eng.repeatMode != ELRepeatModeOff);
+        UIColor *repCol = repActive ? [UIColor whiteColor] : dimWhite;
+        [_repeatBtn setImage:[ELTheme iconRepeatSize:22.0f color:repCol] forState:UIControlStateNormal];
+        _repeatDot.hidden = !repActive;
+        BOOL repOne = (eng.repeatMode == ELRepeatModeOne);
+        _repeatOneBadge.hidden = !repOne;
+        UIView *repBadgeBg = [_repeatBtn viewWithTag:901];
+        if (repBadgeBg) repBadgeBg.hidden = !repOne;
+    }
 
     if (!track) return;
 
@@ -934,45 +964,63 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
 #endif
 
     if (eng.state == ELPlayerStateLoading) {
-        [_playPauseBtn setImage:nil forState:UIControlStateNormal];
+        if (_lastPlayIconState != 2) {
+            _lastPlayIconState = 2;
+            [_playPauseBtn setImage:nil forState:UIControlStateNormal];
+        }
         [_spinner startAnimating];
     } else {
         [_spinner stopAnimating];
-        UIImage *icon = (eng.state == ELPlayerStatePlaying)
-            ? [ELTheme iconPauseSize:34.0f color:[UIColor whiteColor]]
-            : [ELTheme iconPlaySize:34.0f color:[UIColor whiteColor]];
-        [_playPauseBtn setImage:icon forState:UIControlStateNormal];
+        NSInteger iconState = (eng.state == ELPlayerStatePlaying) ? 1 : 0;
+        if (_lastPlayIconState != iconState) {
+            _lastPlayIconState = iconState;
+            UIImage *icon = (iconState == 1)
+                ? [ELTheme iconPauseSize:34.0f color:[UIColor whiteColor]]
+                : [ELTheme iconPlaySize:34.0f color:[UIColor whiteColor]];
+            [_playPauseBtn setImage:icon forState:UIControlStateNormal];
+        }
     }
 
-    /* Update full-bleed album art + dynamic dominant backdrop when artwork changes */
-    UIImage *localArt = nil;
-#if EL_FEATURE_DOWNLOADS
-    localArt = [[ELDownloadManager sharedManager] localArtImageForVideoId:track.videoId];
-#endif
-    if (localArt) {
-        NSString *localKey = [NSString stringWithFormat:@"local:%@", track.videoId];
-        if (![_loadedArtKey isEqualToString:localKey]) {
+    /* Update full-bleed album art + dynamic dominant backdrop without main-thread disk I/O */
+    NSString *url = ([track.artURL length] > 0) ? track.artURL : track.thumbURL;
+    NSString *localKey = ([track.videoId length] > 0)
+        ? [NSString stringWithFormat:@"local:%@", track.videoId]
+        : nil;
+    BOOL artAlreadyLoaded = (localKey && [_loadedArtKey isEqualToString:localKey])
+        || ([url length] > 0 && [_loadedArtKey isEqualToString:url]);
+
+    if (!artAlreadyLoaded) {
+        UIImage *mem = ([url length] > 0) ? [[ELImageCache sharedCache] memoryCachedImageForURL:url] : nil;
+        if (mem) {
+            BOOL wasLoaded = (_loadedArtKey != nil);
             [_loadedArtURL release];
-            _loadedArtURL = nil;
-            [self setArtworkImage:localArt forKey:localKey animated:(_loadedArtKey != nil)];
+            _loadedArtURL = [url copy];
+            [self setArtworkImage:mem forKey:url animated:wasLoaded];
         }
-    } else {
-        NSString *url = ([track.artURL length] > 0) ? track.artURL : track.thumbURL;
-        if ([url length] > 0) {
-            if (![_loadedArtKey isEqualToString:url]) {
+#if EL_FEATURE_DOWNLOADS
+        else if ([track.videoId length] > 0 && [[ELDownloadManager sharedManager] isDownloaded:track.videoId]) {
+            NSString *pendingKey = [NSString stringWithFormat:@"pending:local:%@", track.videoId];
+            if (![_loadedArtKey isEqualToString:pendingKey]) {
                 BOOL wasLoaded = (_loadedArtKey != nil);
-                NSString *pendingKey = [NSString stringWithFormat:@"pending:%@", url];
-                UIImage *c = [[ELImageCache sharedCache] cachedImageForURL:url];
-                if (c) {
-                    [_loadedArtURL release];
-                    _loadedArtURL = [url copy];
-                    [self setArtworkImage:c forKey:url animated:wasLoaded];
-                } else if (![_loadedArtKey isEqualToString:pendingKey]) {
-                    [_loadedArtURL release];
-                    _loadedArtURL = [url copy];
-                    [self setArtworkImage:[ELTheme placeholderArtImage] forKey:pendingKey animated:wasLoaded];
-                    [[ELImageCache sharedCache] loadImageForURL:url target:self action:@selector(onArtLoaded:)];
-                }
+                [_loadedArtURL release];
+                _loadedArtURL = [url copy];
+                [self setArtworkImage:[ELTheme placeholderArtImage] forKey:pendingKey animated:wasLoaded];
+                NSDictionary *args = [NSDictionary dictionaryWithObjectsAndKeys:
+                                      track.videoId, @"videoId",
+                                      url ? url : @"", @"url",
+                                      nil];
+                [NSThread detachNewThreadSelector:@selector(localArtWorker:) toTarget:self withObject:args];
+            }
+        }
+#endif
+        else if ([url length] > 0) {
+            NSString *pendingKey = [NSString stringWithFormat:@"pending:%@", url];
+            if (![_loadedArtKey isEqualToString:pendingKey]) {
+                BOOL wasLoaded = (_loadedArtKey != nil);
+                [_loadedArtURL release];
+                _loadedArtURL = [url copy];
+                [self setArtworkImage:[ELTheme placeholderArtImage] forKey:pendingKey animated:wasLoaded];
+                [[ELImageCache sharedCache] loadImageForURL:url target:self action:@selector(onArtLoaded:)];
             }
         } else if (![_loadedArtKey isEqualToString:@"placeholder"]) {
             [_loadedArtURL release];
@@ -989,6 +1037,43 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
 #endif
     [self refreshProgress];
 }
+
+#if EL_FEATURE_DOWNLOADS
+- (void)localArtWorker:(NSDictionary *)args {
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    [NSThread setThreadPriority:0.25];
+    NSString *vid = [args objectForKey:@"videoId"];
+    NSString *url = [args objectForKey:@"url"];
+    UIImage *img = [[ELDownloadManager sharedManager] localArtImageForVideoId:vid];
+    NSMutableDictionary *res = [NSMutableDictionary dictionaryWithObjectsAndKeys:
+                                vid ? vid : @"", @"videoId",
+                                url ? url : @"", @"url",
+                                nil];
+    if (img) [res setObject:img forKey:@"image"];
+    [self performSelectorOnMainThread:@selector(onLocalArtLoaded:) withObject:res waitUntilDone:NO];
+    [pool release];
+}
+
+- (void)onLocalArtLoaded:(NSDictionary *)res {
+    NSString *vid = [res objectForKey:@"videoId"];
+    ELTrack *cur = [[ELAudioEngine sharedEngine] currentTrack];
+    if (!cur || ![cur.videoId isEqualToString:vid]) return;
+    UIImage *img = [res objectForKey:@"image"];
+    if (img) {
+        NSString *localKey = [NSString stringWithFormat:@"local:%@", vid];
+        [_loadedArtURL release];
+        _loadedArtURL = nil;
+        [self setArtworkImage:img forKey:localKey animated:YES];
+        return;
+    }
+    NSString *url = [res objectForKey:@"url"];
+    if ([url length] > 0) {
+        [_loadedArtURL release];
+        _loadedArtURL = [url copy];
+        [[ELImageCache sharedCache] loadImageForURL:url target:self action:@selector(onArtLoaded:)];
+    }
+}
+#endif
 
 - (void)onArtLoaded:(NSDictionary *)info {
     NSString *url = [info objectForKey:@"url"];
@@ -1089,28 +1174,52 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
 
 - (void)styleLyricCell:(UITableViewCell *)cell forRow:(NSInteger)row line:(ELLyricLine *)line {
     if (!cell || !line) return;
+    static UIFont *sRegularFont = nil;
+    static UIFont *sActiveFont = nil;
+    static UIColor *sUnsyncedColor = nil;
+    static UIColor *sSungColor = nil;
+    static UIColor *sUpcomingColor = nil;
+    if (!sRegularFont) {
+        sRegularFont = [[UIFont systemFontOfSize:14.0f] retain];
+        sActiveFont = [[UIFont boldSystemFontOfSize:16.0f] retain];
+        sUnsyncedColor = [[UIColor colorWithWhite:1.0f alpha:0.86f] retain];
+        sSungColor = [[UIColor colorWithWhite:1.0f alpha:0.34f] retain];
+        sUpcomingColor = [[UIColor colorWithWhite:1.0f alpha:0.58f] retain];
+    }
     if (line.timeSeconds < 0.0) {
-        cell.textLabel.font = [UIFont systemFontOfSize:14.0f];
-        cell.textLabel.textColor = [UIColor colorWithWhite:1.0f alpha:0.86f];
+        cell.textLabel.font = sRegularFont;
+        cell.textLabel.textColor = sUnsyncedColor;
     } else if (row == _activeLyricIndex) {
-        cell.textLabel.font = [UIFont boldSystemFontOfSize:16.0f];
+        cell.textLabel.font = sActiveFont;
         cell.textLabel.textColor = [UIColor whiteColor];
     } else if (_activeLyricIndex >= 0 && row < _activeLyricIndex) {
-        cell.textLabel.font = [UIFont systemFontOfSize:14.0f];
-        cell.textLabel.textColor = [UIColor colorWithWhite:1.0f alpha:0.34f];
+        cell.textLabel.font = sRegularFont;
+        cell.textLabel.textColor = sSungColor;
     } else {
-        cell.textLabel.font = [UIFont systemFontOfSize:14.0f];
-        cell.textLabel.textColor = [UIColor colorWithWhite:1.0f alpha:0.58f];
+        cell.textLabel.font = sRegularFont;
+        cell.textLabel.textColor = sUpcomingColor;
     }
 }
 
 - (void)setActiveLyricIndex:(NSInteger)newIndex scroll:(BOOL)shouldScroll {
     NSInteger count = (NSInteger)[_lyricLines count];
+    NSInteger prevIdx = _activeLyricIndex;
     _activeLyricIndex = newIndex;
-    for (NSIndexPath *ip in [_lyricsTable indexPathsForVisibleRows]) {
-        if ((NSInteger)ip.row >= 0 && (NSInteger)ip.row < count) {
-            UITableViewCell *cell = [_lyricsTable cellForRowAtIndexPath:ip];
-            [self styleLyricCell:cell forRow:(NSInteger)ip.row line:[_lyricLines objectAtIndex:ip.row]];
+    if (prevIdx >= 0 && newIndex == prevIdx + 1 && newIndex < count) {
+        NSIndexPath *oldIp = [NSIndexPath indexPathForRow:prevIdx inSection:0];
+        NSIndexPath *newIp = [NSIndexPath indexPathForRow:newIndex inSection:0];
+        [self styleLyricCell:[_lyricsTable cellForRowAtIndexPath:oldIp]
+                      forRow:prevIdx
+                        line:[_lyricLines objectAtIndex:(NSUInteger)prevIdx]];
+        [self styleLyricCell:[_lyricsTable cellForRowAtIndexPath:newIp]
+                      forRow:newIndex
+                        line:[_lyricLines objectAtIndex:(NSUInteger)newIndex]];
+    } else {
+        for (NSIndexPath *ip in [_lyricsTable indexPathsForVisibleRows]) {
+            if ((NSInteger)ip.row >= 0 && (NSInteger)ip.row < count) {
+                UITableViewCell *cell = [_lyricsTable cellForRowAtIndexPath:ip];
+                [self styleLyricCell:cell forRow:(NSInteger)ip.row line:[_lyricLines objectAtIndex:ip.row]];
+            }
         }
     }
     if (shouldScroll && _activeLyricIndex >= 0 && _activeLyricIndex < count) {
@@ -1145,11 +1254,6 @@ static NSString *const kELMarqueeAnimKey = @"elMarqueeScroll";
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     (void)tableView; (void)section;
     return _lyricLines ? (NSInteger)[_lyricLines count] : 0;
-}
-
-- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
-    (void)tableView; (void)indexPath;
-    return 38.0f;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {

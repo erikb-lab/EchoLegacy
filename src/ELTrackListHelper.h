@@ -20,6 +20,8 @@
 
 + (ELTrackCell *)dequeueTrackCellForTableView:(UITableView *)tableView track:(ELTrack *)track;
 
++ (void)refreshVisibleTrackHighlightInTableView:(UITableView *)tableView;
+
 + (void)refreshVisibleTrackCellsInTableView:(UITableView *)tableView forVideoId:(NSString *)videoId;
 
 @end

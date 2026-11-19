@@ -12,9 +12,10 @@ NSString *const ELPlayerProgressNotification = @"ELPlayerProgressNotification";
 NSString *const ELPlayerToastNotification = @"ELPlayerToastNotification";
 
 /* 8 x 16 KB = 128 KB (~8 seconds AAC buffer), lean for 128 MB RAM iPod touch 2G */
-#define EL_AQ_NUM_BUFS  8
-#define EL_AQ_BUF_SIZE  16384
-#define EL_AQ_MAX_PKTS  128
+#define EL_AQ_NUM_BUFS     8
+#define EL_AQ_BUF_SIZE     16384
+#define EL_AQ_MAX_PKTS     128
+#define EL_ADTS_BATCH_SIZE 6144
 
 /* 256 KB pre-next disk chunk (~16s of 128kbps AAC-LC + ftyp/moov/sidx index) */
 #define EL_PRENEXT_CHUNK_BYTES  262144ULL
@@ -49,6 +50,8 @@ typedef struct {
     int queuedCount;
 
     el_fmp4_ctx_t *fmp4;
+    uint8_t adtsBatch[EL_ADTS_BATCH_SIZE];
+    size_t  adtsBatchLen;
 } el_stream_session_t;
 
 static el_stream_session_t *g_active_stream = NULL;
@@ -132,6 +135,9 @@ static void el_afs_property_cb(void *inClientData,
         OSStatus st = AudioQueueNewOutput(&asbd, el_aq_output_cb, s, NULL, NULL, 0, &newAQ);
         if (st != noErr || !newAQ) return;
 
+        UInt32 hwPolicy = kAudioQueueHardwareCodecPolicy_PreferHardware;
+        AudioQueueSetProperty(newAQ, kAudioQueueProperty_HardwareCodecPolicy, &hwPolicy, sizeof(hwPolicy));
+
         /* Copy magic cookie if present */
         UInt32 cookieSize = 0;
         Boolean writable = false;
@@ -196,10 +202,29 @@ static void el_afs_packets_cb(void *inClientData,
     }
 }
 
+static void el_stream_flush_adts_batch(el_stream_session_t *s) {
+    if (!s || s->adtsBatchLen == 0) return;
+    size_t n = s->adtsBatchLen;
+    s->adtsBatchLen = 0;
+    if (!s->stopFlag && !s->seekFlag && s->afs) {
+        AudioFileStreamParseBytes(s->afs, (UInt32)n, s->adtsBatch, 0);
+    }
+}
+
 static void el_stream_on_adts(const uint8_t *adts, size_t len, void *userData) {
     el_stream_session_t *s = (el_stream_session_t *)userData;
-    if (!s || s->stopFlag || s->seekFlag || !s->afs) return;
-    AudioFileStreamParseBytes(s->afs, (UInt32)len, adts, 0);
+    if (!s || s->stopFlag || s->seekFlag || !s->afs || len == 0) return;
+    if (len >= EL_ADTS_BATCH_SIZE) {
+        el_stream_flush_adts_batch(s);
+        AudioFileStreamParseBytes(s->afs, (UInt32)len, adts, 0);
+        return;
+    }
+    if (s->adtsBatchLen + len > EL_ADTS_BATCH_SIZE) {
+        el_stream_flush_adts_batch(s);
+        if (s->stopFlag || s->seekFlag) return;
+    }
+    memcpy(s->adtsBatch + s->adtsBatchLen, adts, len);
+    s->adtsBatchLen += len;
 }
 
 static BOOL el_stream_on_http_chunk(const uint8_t *bytes, NSUInteger length, long long contentLength, void *userData) {
@@ -242,6 +267,7 @@ static void el_stream_teardown_aq(el_stream_session_t *s, BOOL immediate) {
     s->fillBytes = 0;
     s->fillPkts = 0;
     s->queuedCount = 0;
+    s->adtsBatchLen = 0;
     pthread_mutex_unlock(&s->lock);
 }
 
@@ -329,6 +355,7 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
 }
 
 - (void)activateAudioSession {
+    if (_audioSessionActive) return;
     UInt32 category = kAudioSessionCategory_MediaPlayback;
     AudioSessionSetProperty(kAudioSessionProperty_AudioCategory, sizeof(category), &category);
     AudioSessionSetActive(true);
@@ -336,6 +363,7 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
     AVAudioSession *session = [AVAudioSession sharedInstance];
     [session setCategory:AVAudioSessionCategoryPlayback error:nil];
     [session setActive:YES error:nil];
+    _audioSessionActive = YES;
 }
 
 - (void)beginBgTransitionTask {
@@ -358,6 +386,7 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
 }
 
 - (void)handleAudioInterruptionBegin {
+    _audioSessionActive = NO;
     _resumeAfterInterruption = (_state == ELPlayerStatePlaying);
     if (_resumeAfterInterruption) {
         [self pause];
@@ -528,12 +557,13 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
     BOOL matchInFlight = (candId && _preNextInFlightVideoId && [_preNextInFlightVideoId isEqualToString:candId]);
     if (!matchReady && !matchInFlight) {
         [self resetPreNextStateLocked:YES clearReady:YES clearAttempted:YES];
+        _preNextDoneToken = 0;
     }
     pthread_mutex_unlock(&g_prenext_lock);
 }
 
 - (void)maybeTriggerPreNextBuffer {
-    if (_state != ELPlayerStatePlaying) return;
+    if (_state != ELPlayerStatePlaying || _preNextDoneToken == _sessionToken) return;
 
     double cur = [self currentTime];
     double dur = [self duration];
@@ -545,6 +575,7 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
     ELTrack *cand = [self nextCandidateTrack];
     if (!cand) {
         [self syncPreNextWithCandidate];
+        _preNextDoneToken = _sessionToken;
         return;
     }
 
@@ -558,6 +589,7 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
         if (_preNextStreamInfo && _preNextByteLength > 0 &&
             (now - _preNextReadyTime) >= 0.0 && (now - _preNextReadyTime) < EL_PRENEXT_MAX_AGE_SEC) {
             /* Already pre-buffered and fresh! */
+            _preNextDoneToken = _sessionToken;
             pthread_mutex_unlock(&g_prenext_lock);
             return;
         }
@@ -566,12 +598,14 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
     }
     if (_preNextInFlightVideoId && [_preNextInFlightVideoId isEqualToString:vid]) {
         /* Already in flight for this videoId */
+        _preNextDoneToken = _sessionToken;
         pthread_mutex_unlock(&g_prenext_lock);
         return;
     }
     if (_preNextAttemptedSessionToken == _sessionToken &&
         _preNextAttemptedVideoId && [_preNextAttemptedVideoId isEqualToString:vid]) {
         /* Already attempted for this videoId during the current track session */
+        _preNextDoneToken = _sessionToken;
         pthread_mutex_unlock(&g_prenext_lock);
         return;
     }
@@ -582,6 +616,7 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
     _preNextAttemptedSessionToken = _sessionToken;
     [_preNextAttemptedVideoId release];
     _preNextAttemptedVideoId = [vid copy];
+    _preNextDoneToken = _sessionToken;
     unlink([[self preNextPartPathForGen:launchGen] UTF8String]);
     shouldLaunch = YES;
     pthread_mutex_unlock(&g_prenext_lock);
@@ -638,6 +673,7 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
         [pool release];
         return;
     }
+    setvbuf(fp, NULL, _IOFBF, 32768);
 
     el_prenext_dl_ctx_t pctx;
     memset(&pctx, 0, sizeof(pctx));
@@ -720,7 +756,6 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
 - (void)setShakeToShuffleEnabled:(BOOL)enabled {
     _shakeToShuffleEnabled = enabled;
     [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:@"ELShakeToShuffle"];
-    [[NSUserDefaults standardUserDefaults] synchronize];
 }
 
 - (void)postToast:(NSString *)message {
@@ -756,11 +791,11 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
     NSTimeInterval secs = (NSTimeInterval)minutes * 60.0;
     _sleepFireDate = [[NSDate dateWithTimeIntervalSinceNow:secs] retain];
     _sleepTimerRemainingSeconds = minutes * 60;
-    _sleepTimer = [[NSTimer scheduledTimerWithTimeInterval:1.0
+    _sleepTimer = [[NSTimer scheduledTimerWithTimeInterval:secs
                                                      target:self
-                                                   selector:@selector(onSleepTimerTick:)
+                                                   selector:@selector(onSleepTimerFired:)
                                                    userInfo:nil
-                                                    repeats:YES] retain];
+                                                    repeats:NO] retain];
     [self postToast:[NSString stringWithFormat:@"Sleep timer: %ld min", (long)minutes]];
 }
 
@@ -768,24 +803,14 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
     [self setSleepTimerMinutes:[num integerValue]];
 }
 
-- (void)onSleepTimerTick:(NSTimer *)timer {
-    if (!_sleepFireDate) {
-        [_sleepTimer invalidate];
-        [_sleepTimer release]; _sleepTimer = nil;
-        _sleepTimerRemainingSeconds = 0;
-        return;
-    }
-    NSTimeInterval rem = [_sleepFireDate timeIntervalSinceNow];
-    if (rem <= 0) {
-        [_sleepTimer invalidate];
-        [_sleepTimer release]; _sleepTimer = nil;
-        [_sleepFireDate release]; _sleepFireDate = nil;
-        _sleepTimerRemainingSeconds = 0;
-        [self pause];
-        [self postToast:@"Sleep timer ended"];
-    } else {
-        _sleepTimerRemainingSeconds = (NSInteger)ceil(rem);
-    }
+- (void)onSleepTimerFired:(NSTimer *)timer {
+    (void)timer;
+    [_sleepTimer invalidate];
+    [_sleepTimer release]; _sleepTimer = nil;
+    [_sleepFireDate release]; _sleepFireDate = nil;
+    _sleepTimerRemainingSeconds = 0;
+    [self pause];
+    [self postToast:@"Sleep timer ended"];
 }
 
 - (double)currentTime {
@@ -884,7 +909,15 @@ static BOOL el_prenext_on_http_chunk(const uint8_t *bytes, NSUInteger length, lo
 
 - (void)onProgressTick {
     if (!_isBackgrounded) {
-        [[NSNotificationCenter defaultCenter] postNotificationName:ELPlayerProgressNotification object:self];
+        double cur = [self currentTime];
+        double dur = [self duration];
+        NSDictionary *ui = [NSDictionary dictionaryWithObjectsAndKeys:
+                            [NSNumber numberWithDouble:cur], @"currentTime",
+                            [NSNumber numberWithDouble:dur], @"duration",
+                            nil];
+        [[NSNotificationCenter defaultCenter] postNotificationName:ELPlayerProgressNotification
+                                                            object:self
+                                                          userInfo:ui];
     }
     [self maybeTriggerPreNextBuffer];
     if (_isBackgrounded && ![self needsBackgroundPreNextTimer]) {
@@ -1096,23 +1129,19 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
     [self beginBgTransitionTask];
     [self activateAudioSession];
 
-    /* Check if downloaded offline first */
+    /* Check if downloaded offline first — init & prepareToPlay off main thread */
     if ([[ELDownloadManager sharedManager] isDownloaded:track.videoId]) {
         [self syncPreNextWithCandidate];
         NSString *localPath = [[ELDownloadManager sharedManager] localAudioPathForVideoId:track.videoId];
-        NSURL *fileURL = [NSURL fileURLWithPath:localPath];
-        NSError *err = nil;
-        AVAudioPlayer *player = [[AVAudioPlayer alloc] initWithContentsOfURL:fileURL error:&err];
-        if (player) {
-            _offlinePlayer = player;
-            _offlinePlayer.delegate = self;
-            [_offlinePlayer prepareToPlay];
-            [_offlinePlayer play];
+        if (localPath) {
             _playingOffline = YES;
-            _state = ELPlayerStatePlaying;
-            [self endBgTransitionTask];
-            [self startProgressTimer];
+            _state = ELPlayerStateLoading;
             [self postStateChanged];
+            NSDictionary *offArgs = [NSDictionary dictionaryWithObjectsAndKeys:
+                                     localPath, @"path",
+                                     [NSNumber numberWithInteger:myToken], @"token",
+                                     nil];
+            [NSThread detachNewThreadSelector:@selector(offlineLoadThreadMain:) toTarget:self withObject:offArgs];
             return;
         }
     }
@@ -1156,6 +1185,50 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
         [args setObject:[NSNumber numberWithUnsignedLongLong:claimedPreNextBytes] forKey:@"preNextBytes"];
     }
     [NSThread detachNewThreadSelector:@selector(streamThreadMain:) toTarget:self withObject:args];
+}
+
+- (void)offlineLoadThreadMain:(NSDictionary *)args {
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    [NSThread setThreadPriority:0.65];
+    NSString *localPath = [args objectForKey:@"path"];
+    NSNumber *tokenNum = [args objectForKey:@"token"];
+    NSURL *fileURL = [NSURL fileURLWithPath:localPath];
+    NSError *err = nil;
+    AVAudioPlayer *player = [[AVAudioPlayer alloc] initWithContentsOfURL:fileURL error:&err];
+    if (player) {
+        [player prepareToPlay];
+    }
+    NSMutableDictionary *res = [NSMutableDictionary dictionaryWithObject:tokenNum forKey:@"token"];
+    if (player) [res setObject:player forKey:@"player"];
+    if (err) [res setObject:[err localizedDescription] forKey:@"error"];
+    [player release];
+    [self performSelectorOnMainThread:@selector(offlinePlayerReady:) withObject:res waitUntilDone:NO];
+    [pool drain];
+}
+
+- (void)offlinePlayerReady:(NSDictionary *)res {
+    NSInteger tok = [[res objectForKey:@"token"] integerValue];
+    if (tok != _sessionToken) return;
+    AVAudioPlayer *player = [res objectForKey:@"player"];
+    if (player) {
+        [_offlinePlayer release];
+        _offlinePlayer = [player retain];
+        _offlinePlayer.delegate = self;
+        [_offlinePlayer play];
+        _playingOffline = YES;
+        _state = ELPlayerStatePlaying;
+        [self endBgTransitionTask];
+        [self startProgressTimer];
+        [self postStateChanged];
+    } else {
+        [self endBgTransitionTask];
+        [_lastError release];
+        _lastError = [[res objectForKey:@"error"] copy];
+        if (!_lastError) _lastError = [@"Could not play offline file" copy];
+        _state = ELPlayerStateError;
+        [self stopProgressTimer];
+        [self postStateChanged];
+    }
 }
 
 - (void)streamDidStartPlayingToken:(NSNumber *)tokenNum {
@@ -1251,13 +1324,14 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
     uint64_t preNextBytes = [[args objectForKey:@"preNextBytes"] unsignedLongLongValue];
 
     NSString *resolveErr = nil;
-    ELStreamInfo *streamInfo = preStreamInfo;
+    ELStreamInfo *streamInfo = [preStreamInfo retain];
     BOOL usedPreStreamInfo = (streamInfo != nil);
     if (!streamInfo) {
-        streamInfo = [[ELYouTubeClient sharedClient] resolveAudioStreamForVideoId:track.videoId error:&resolveErr];
+        streamInfo = [[[ELYouTubeClient sharedClient] resolveAudioStreamForVideoId:track.videoId error:&resolveErr] retain];
     }
     if (myToken != _sessionToken) {
         if (preNextFile) unlink([preNextFile UTF8String]);
+        [streamInfo release];
         [pool release];
         return;
     }
@@ -1302,12 +1376,14 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
     BOOL finishedNaturally = NO;
 
     while (!s->stopFlag && myToken == _sessionToken) {
+        NSAutoreleasePool *iterPool = [[NSAutoreleasePool alloc] init];
         s->seekFlag = NO;
         if (!s->afs && AudioFileStreamOpen(s, el_afs_property_cb, el_afs_packets_cb, kAudioFileAAC_ADTSType, &s->afs) != noErr) {
             if (hasPreNextFile && preNextFile) {
                 unlink([preNextFile UTF8String]);
                 hasPreNextFile = NO;
             }
+            [iterPool drain];
             break;
         }
 
@@ -1345,10 +1421,12 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
 
                 if (s->stopFlag || myToken != _sessionToken) {
                     el_stream_teardown_aq(s, YES);
+                    [iterPool drain];
                     break;
                 }
                 if (s->seekFlag) {
                     rangeStart = [self applySeekForSession:s];
+                    [iterPool drain];
                     continue;
                 }
                 if (fileParseOk && fedFromFile > 0) {
@@ -1359,6 +1437,7 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
                     _streamSeekBaseSec = 0.0;
                     el_fmp4_reset_for_seek(s->fmp4, 0);
                     el_stream_teardown_aq(s, YES);
+                    [iterPool drain];
                     continue;
                 }
             } else {
@@ -1392,11 +1471,13 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
 
         if (s->stopFlag || myToken != _sessionToken) {
             el_stream_teardown_aq(s, YES);
+            [iterPool drain];
             break;
         }
 
         if (s->seekFlag) {
             rangeStart = [self applySeekForSession:s];
+            [iterPool drain];
             continue;
         }
 
@@ -1408,7 +1489,8 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
                 ELStreamInfo *fresh = [[ELYouTubeClient sharedClient] resolveAudioStreamForVideoId:track.videoId error:&resolveErr];
                 if (fresh) {
                     NSInteger prevItag = streamInfo.itag;
-                    streamInfo = fresh;
+                    [streamInfo release];
+                    streamInfo = [fresh retain];
                     uint64_t resumeOff = el_fmp4_stream_offset(s->fmp4);
                     if (fresh.itag == prevItag && el_fmp4_has_config(s->fmp4) && resumeOff > 0) {
                         rangeStart = resumeOff;
@@ -1419,16 +1501,19 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
                         el_fmp4_reset_for_seek(s->fmp4, 0);
                         el_stream_teardown_aq(s, YES);
                     }
+                    [iterPool drain];
                     continue;
                 }
             }
             el_stream_teardown_aq(s, YES);
             [self notifyStreamFailed:(httpErr ? httpErr : [NSString stringWithFormat:@"Stream HTTP %ld", (long)status])
                             forToken:myToken];
+            [iterPool drain];
             break;
         }
 
-        /* Flush last partial buffer & start queue if short track */
+        /* Flush any batched ADTS frames, then last partial AQ buffer & start queue if short track */
+        el_stream_flush_adts_batch(s);
         if (s->fillIdx >= 0 && s->fillBytes > 0) {
             el_aq_enqueue_fill(s);
         }
@@ -1457,6 +1542,7 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
 
         if (s->seekFlag) {
             rangeStart = [self applySeekForSession:s];
+            [iterPool drain];
             continue;
         }
 
@@ -1464,8 +1550,11 @@ static NSArray *el_shuffled_array_keeping_first(NSArray *items, ELTrack *firstTr
         if (!s->stopFlag && myToken == _sessionToken) {
             finishedNaturally = YES;
         }
+        [iterPool drain];
         break;
     }
+
+    [streamInfo release];
 
     if (hasPreNextFile && preNextFile) {
         unlink([preNextFile UTF8String]);

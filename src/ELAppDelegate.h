@@ -8,6 +8,7 @@
     ELWindow *_window;
     UITabBarController *_tabBarController;
     ELMiniPlayerBar *_miniPlayerBar;
+    UIImageView *_toastBgView;
     UILabel *_toastLabel;
     NSTimer *_toastTimer;
     UIView *_privacyShieldView;

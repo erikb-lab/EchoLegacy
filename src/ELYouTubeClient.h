@@ -19,11 +19,14 @@ extern NSString *const ELLibraryUpdatedNotification;
 
 @interface ELYouTubeClient : NSObject {
     NSArray *_cachedLikedSongs;
+    NSSet *_cachedLikedIds;
     NSArray *_cachedPlaylists;
     NSTimeInterval _lastSyncTime;
     NSString *_visitorData;
     NSMutableDictionary *_streamInfoCache;
     NSMutableArray *_streamInfoLRU;
+    NSMutableDictionary *_playlistTrackLRU;
+    NSMutableArray *_playlistTrackLRUOrder;
 }
 
 + (ELYouTubeClient *)sharedClient;

@@ -71,6 +71,17 @@
     return cell;
 }
 
++ (void)refreshVisibleTrackHighlightInTableView:(UITableView *)tableView {
+    NSString *curVid = [[ELAudioEngine sharedEngine] currentTrack].videoId;
+    NSArray *cells = [tableView visibleCells];
+    for (UITableViewCell *cell in cells) {
+        if (![cell isKindOfClass:[ELTrackCell class]]) continue;
+        ELTrackCell *tc = (ELTrackCell *)cell;
+        BOOL isCur = (curVid && [curVid isEqualToString:tc.videoId]);
+        [tc setCurrent:isCur];
+    }
+}
+
 + (void)refreshVisibleTrackCellsInTableView:(UITableView *)tableView forVideoId:(NSString *)videoId {
 #if EL_FEATURE_DOWNLOADS
     NSArray *cells = [tableView visibleCells];

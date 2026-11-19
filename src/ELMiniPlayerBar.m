@@ -63,7 +63,8 @@
     /* Pre-rendered 36x36 rounded thumbnail (zero offscreen FBO clipping) */
     _artView = [[UIImageView alloc] initWithFrame:CGRectMake(10.0f, 9.0f, 36.0f, 36.0f)];
     _artView.contentMode = UIViewContentModeScaleToFill;
-    _artView.backgroundColor = [UIColor clearColor];
+    _artView.backgroundColor = bg;
+    _artView.opaque = YES;
     _artView.image = [ELTheme roundedPlaceholderArtSize:36.0f radius:5.0f];
     _artView.userInteractionEnabled = NO;
     [self addSubview:_artView];
@@ -93,9 +94,14 @@
     _spinner.hidesWhenStopped = YES;
     [self addSubview:_spinner];
 
+#if EL_FEATURE_LIKES
+    _lastLikeVisualState = -1;
+#endif
+    _lastPlayIconState = -1;
+
     NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
     [nc addObserver:self selector:@selector(refresh) name:ELPlayerStateChangedNotification object:nil];
-    [nc addObserver:self selector:@selector(refreshProgress) name:ELPlayerProgressNotification object:nil];
+    [nc addObserver:self selector:@selector(onProgressNotification:) name:ELPlayerProgressNotification object:nil];
 #if EL_FEATURE_LIKES
     [nc addObserver:self selector:@selector(refreshLikeState) name:ELLibraryUpdatedNotification object:nil];
 #endif
@@ -133,6 +139,9 @@
 
 #if EL_FEATURE_LIKES
 - (void)updateLikeVisual {
+    NSInteger state = _isLiked ? 1 : 0;
+    if (state == _lastLikeVisualState) return;
+    _lastLikeVisualState = state;
     UIImage *img = _isLiked
         ? [ELTheme iconHeartFilledSize:18.0f color:[ELTheme accentColor]]
         : [ELTheme iconHeartOutlineSize:18.0f color:[ELTheme textSecondaryColor]];
@@ -222,18 +231,32 @@
 }
 #endif
 
-- (void)refreshProgress {
+- (void)updateProgressWithCurrentTime:(double)cur duration:(double)dur {
     if (self.hidden || !self.window) return;
-    ELAudioEngine *eng = [ELAudioEngine sharedEngine];
-    double dur = [eng duration];
-    double cur = [eng currentTime];
     CGFloat frac = (dur > 0.0) ? (CGFloat)(cur / dur) : 0.0f;
     if (frac < 0.0f) frac = 0.0f;
     if (frac > 1.0f) frac = 1.0f;
-    CGFloat targetW = floorf(self.frame.size.width * frac * 2.0f) * 0.5f;
-    if (fabsf(_progressFill.frame.size.width - targetW) >= 0.5f) {
+    CGFloat targetW = floorf(self.frame.size.width * frac);
+    if (_progressFill.frame.size.width != targetW) {
         _progressFill.frame = CGRectMake(0.0f, 0.0f, targetW, 2.0f);
     }
+}
+
+- (void)onProgressNotification:(NSNotification *)note {
+    NSDictionary *info = [note userInfo];
+    NSNumber *curNum = [info objectForKey:@"currentTime"];
+    NSNumber *durNum = [info objectForKey:@"duration"];
+    if (curNum && durNum) {
+        [self updateProgressWithCurrentTime:[curNum doubleValue] duration:[durNum doubleValue]];
+    } else {
+        [self refreshProgress];
+    }
+}
+
+- (void)refreshProgress {
+    if (self.hidden || !self.window) return;
+    ELAudioEngine *eng = [ELAudioEngine sharedEngine];
+    [self updateProgressWithCurrentTime:[eng currentTime] duration:[eng duration]];
 }
 
 - (void)refreshArtworkForTrack:(ELTrack *)track {
@@ -303,15 +326,22 @@
         _subtitleLabel.text = eng.lastError ? eng.lastError : @"Playback error";
         [_spinner stopAnimating];
         _playPauseBtn.hidden = NO;
-        [_playPauseBtn setImage:[ELTheme iconPlaySize:22.0f color:[ELTheme accentColor]] forState:UIControlStateNormal];
+        if (_lastPlayIconState != 2) {
+            _lastPlayIconState = 2;
+            [_playPauseBtn setImage:[ELTheme iconPlaySize:22.0f color:[ELTheme accentColor]] forState:UIControlStateNormal];
+        }
     } else {
         _subtitleLabel.text = track.artist;
         [_spinner stopAnimating];
         _playPauseBtn.hidden = NO;
-        UIImage *icon = (eng.state == ELPlayerStatePlaying)
-            ? [ELTheme iconPauseSize:22.0f color:[ELTheme textPrimaryColor]]
-            : [ELTheme iconPlaySize:22.0f color:[ELTheme textPrimaryColor]];
-        [_playPauseBtn setImage:icon forState:UIControlStateNormal];
+        NSInteger iconState = (eng.state == ELPlayerStatePlaying) ? 1 : 0;
+        if (_lastPlayIconState != iconState) {
+            _lastPlayIconState = iconState;
+            UIImage *icon = (iconState == 1)
+                ? [ELTheme iconPauseSize:22.0f color:[ELTheme textPrimaryColor]]
+                : [ELTheme iconPlaySize:22.0f color:[ELTheme textPrimaryColor]];
+            [_playPauseBtn setImage:icon forState:UIControlStateNormal];
+        }
     }
 
     [self refreshArtworkForTrack:track];

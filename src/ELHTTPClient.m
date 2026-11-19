@@ -1538,6 +1538,10 @@ static BOOL el_drain_content_length_body(el_conn_t *conn,
     return YES;
 }
 
++ (void)clearKeepAlivePool {
+    el_http_pool_clear_all();
+}
+
 + (NSTimeInterval)syncedCurrentTime {
     return (NSTimeInterval)el_synced_epoch_now(NULL);
 }
@@ -1711,14 +1715,23 @@ static BOOL el_drain_content_length_body(el_conn_t *conn,
             canReuse = ([leftover length] == 0);
         } else if (isChunked) {
             NSMutableData *cbuf = [NSMutableData dataWithData:leftover];
+            NSUInteger cpos = 0;
             BOOL done = NO;
             BOOL trailersClean = NO;
             while (!done && !aborted && !transferError) {
+                if (cpos > 0 && cpos == [cbuf length]) {
+                    [cbuf setLength:0];
+                    cpos = 0;
+                } else if (cpos > 4096 && cpos * 2 >= [cbuf length]) {
+                    [cbuf replaceBytesInRange:NSMakeRange(0, cpos) withBytes:NULL length:0];
+                    cpos = 0;
+                }
+
                 /* Ensure we have a chunk size line (\r\n) within 256 bytes (Flaw #10) */
                 NSUInteger crlf = NSNotFound;
                 while (crlf == NSNotFound) {
-                    const char *p = (const char *)[cbuf bytes];
-                    NSUInteger cl = [cbuf length];
+                    const char *p = (const char *)[cbuf bytes] + cpos;
+                    NSUInteger cl = [cbuf length] - cpos;
                     for (NSUInteger i = 0; i + 1 < cl; i++) {
                         if (p[i] == '\r' && p[i+1] == '\n') { crlf = i; break; }
                     }
@@ -1745,23 +1758,22 @@ static BOOL el_drain_content_length_body(el_conn_t *conn,
                     break;
                 }
 
-                NSString *szLine = [[[NSString alloc] initWithBytes:[cbuf bytes]
-                                                             length:crlf
-                                                           encoding:NSASCIIStringEncoding] autorelease];
-                const char *szCStr = [szLine UTF8String];
-                if (!szCStr || !isxdigit((unsigned char)szCStr[0])) {
+                char szBuf[EL_HTTP_MAX_CHUNK_LINE_BYTES + 1];
+                memcpy(szBuf, (const char *)[cbuf bytes] + cpos, crlf);
+                szBuf[crlf] = '\0';
+                if (!isxdigit((unsigned char)szBuf[0])) {
                     transferError = YES;
                     transferErrMsg = @"Invalid HTTP chunk size";
                     break;
                 }
                 char *endPtr = NULL;
-                unsigned long chunkSize = strtoul(szCStr, &endPtr, 16);
-                if (endPtr == szCStr || chunkSize > EL_HTTP_MAX_SINGLE_CHUNK_BYTES) {
+                unsigned long chunkSize = strtoul(szBuf, &endPtr, 16);
+                if (endPtr == szBuf || chunkSize > EL_HTTP_MAX_SINGLE_CHUNK_BYTES) {
                     transferError = YES;
                     transferErrMsg = @"HTTP chunk size exceeds maximum";
                     break;
                 }
-                [cbuf replaceBytesInRange:NSMakeRange(0, crlf + 2) withBytes:NULL length:0];
+                cpos += crlf + 2;
 
                 if (chunkSize == 0) {
                     done = YES;
@@ -1769,8 +1781,8 @@ static BOOL el_drain_content_length_body(el_conn_t *conn,
                     for (int tline = 0; tline < 32; tline++) {
                         NSUInteger tcrlf = NSNotFound;
                         while (tcrlf == NSNotFound) {
-                            const char *tp = (const char *)[cbuf bytes];
-                            NSUInteger tl = [cbuf length];
+                            const char *tp = (const char *)[cbuf bytes] + cpos;
+                            NSUInteger tl = [cbuf length] - cpos;
                             for (NSUInteger i = 0; i + 1 < tl; i++) {
                                 if (tp[i] == '\r' && tp[i+1] == '\n') { tcrlf = i; break; }
                             }
@@ -1782,9 +1794,9 @@ static BOOL el_drain_content_length_body(el_conn_t *conn,
                             }
                         }
                         if (tcrlf == NSNotFound) break;
-                        [cbuf replaceBytesInRange:NSMakeRange(0, tcrlf + 2) withBytes:NULL length:0];
+                        cpos += tcrlf + 2;
                         if (tcrlf == 0) {
-                            trailersClean = ([cbuf length] == 0);
+                            trailersClean = (cpos == [cbuf length]);
                             break;
                         }
                     }
@@ -1793,14 +1805,19 @@ static BOOL el_drain_content_length_body(el_conn_t *conn,
 
                 unsigned long rem = chunkSize;
                 while (rem > 0 && !aborted && !transferError) {
-                    if ([cbuf length] > 0) {
-                        NSUInteger take = ([cbuf length] < rem) ? [cbuf length] : (NSUInteger)rem;
-                        if (callback && !callback((const uint8_t *)[cbuf bytes], take, contentLen, userData)) {
+                    NSUInteger avail = [cbuf length] - cpos;
+                    if (avail > 0) {
+                        NSUInteger take = (avail < rem) ? avail : (NSUInteger)rem;
+                        if (callback && !callback((const uint8_t *)[cbuf bytes] + cpos, take, contentLen, userData)) {
                             aborted = YES;
                             break;
                         }
-                        [cbuf replaceBytesInRange:NSMakeRange(0, take) withBytes:NULL length:0];
+                        cpos += take;
                         rem -= take;
+                        if (cpos == [cbuf length]) {
+                            [cbuf setLength:0];
+                            cpos = 0;
+                        }
                     } else {
                         int n = el_conn_read(conn, rbuf, (rem < sizeof(rbuf)) ? (size_t)rem : sizeof(rbuf));
                         if (n <= 0) {
@@ -1818,7 +1835,7 @@ static BOOL el_drain_content_length_body(el_conn_t *conn,
                 if (aborted || transferError) break;
 
                 /* Consume trailing \r\n after chunk data */
-                while ([cbuf length] < 2) {
+                while ([cbuf length] - cpos < 2) {
                     int n = el_conn_read(conn, rbuf, sizeof(rbuf));
                     if (n <= 0) {
                         transferError = YES;
@@ -1828,13 +1845,13 @@ static BOOL el_drain_content_length_body(el_conn_t *conn,
                     [cbuf appendBytes:rbuf length:(NSUInteger)n];
                 }
                 if (transferError) break;
-                const uint8_t *delim = (const uint8_t *)[cbuf bytes];
+                const uint8_t *delim = (const uint8_t *)[cbuf bytes] + cpos;
                 if (delim[0] != '\r' || delim[1] != '\n') {
                     transferError = YES;
                     transferErrMsg = @"Malformed HTTP chunk delimiter";
                     break;
                 }
-                [cbuf replaceBytesInRange:NSMakeRange(0, 2) withBytes:NULL length:0];
+                cpos += 2;
             }
             if (!aborted && !transferError && !done) {
                 transferError = YES;
@@ -1917,6 +1934,7 @@ static BOOL el_drain_content_length_body(el_conn_t *conn,
         BOOL gunzipFailed = NO;
         NSUInteger gunzipCap = (maxBytes > EL_HTTP_MAX_GUNZIP_BYTES) ? maxBytes : EL_HTTP_MAX_GUNZIP_BYTES;
         NSData *decompressed = el_gunzip_data(bctx.buf, gunzipCap, &gunzipFailed);
+        [bctx.buf setLength:0];
         if (gunzipFailed || !decompressed) {
             resp.errorMessage = @"Invalid or oversized gzip response body";
             resp.body = nil;

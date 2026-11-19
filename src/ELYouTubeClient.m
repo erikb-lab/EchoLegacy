@@ -113,12 +113,18 @@ static NSInteger el_parse_duration_text(NSString *text) {
 }
 
 static BOOL el_looks_like_duration(NSString *s) {
-    if ([s length] < 3 || [s length] > 8) return NO;
-    NSRange colon = [s rangeOfString:@":"];
-    if (colon.location == NSNotFound) return NO;
-    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:@"0123456789:"];
-    NSCharacterSet *inStr = [NSCharacterSet characterSetWithCharactersInString:s];
-    return [allowed isSupersetOfSet:inStr];
+    NSUInteger len = [s length];
+    if (len < 3 || len > 8) return NO;
+    BOOL hasColon = NO;
+    for (NSUInteger i = 0; i < len; i++) {
+        unichar c = [s characterAtIndex:i];
+        if (c == ':') {
+            hasColon = YES;
+        } else if (c < '0' || c > '9') {
+            return NO;
+        }
+    }
+    return hasColon;
 }
 
 static NSString *el_extract_best_thumb(NSDictionary *thumbRenderer) {
@@ -521,9 +527,12 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
     self = [super init];
     if (self) {
         _cachedLikedSongs = [[NSArray alloc] init];
+        _cachedLikedIds = [[NSSet alloc] init];
         _cachedPlaylists = [[NSArray alloc] init];
         _streamInfoCache = [[NSMutableDictionary alloc] init];
         _streamInfoLRU = [[NSMutableArray alloc] init];
+        _playlistTrackLRU = [[NSMutableDictionary alloc] initWithCapacity:4];
+        _playlistTrackLRUOrder = [[NSMutableArray alloc] initWithCapacity:4];
         [self loadLibraryCache];
     }
     return self;
@@ -531,11 +540,47 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
 
 - (void)dealloc {
     [_cachedLikedSongs release];
+    [_cachedLikedIds release];
     [_cachedPlaylists release];
     [_visitorData release];
     [_streamInfoCache release];
     [_streamInfoLRU release];
+    [_playlistTrackLRU release];
+    [_playlistTrackLRUOrder release];
     [super dealloc];
+}
+
+- (void)rebuildLikedIdsLocked {
+    NSMutableSet *ids = [NSMutableSet setWithCapacity:[_cachedLikedSongs count]];
+    for (ELTrack *t in _cachedLikedSongs) {
+        if ([t.videoId length] > 0) [ids addObject:t.videoId];
+    }
+    [_cachedLikedIds release];
+    _cachedLikedIds = [ids copy];
+}
+
+static BOOL el_write_binary_plist(id obj, NSString *path) {
+    if (!obj || [path length] == 0) return NO;
+    NSString *errDesc = nil;
+    NSData *binData = [NSPropertyListSerialization dataFromPropertyList:obj
+                                                                 format:NSPropertyListBinaryFormat_v1_0
+                                                       errorDescription:&errDesc];
+    if (errDesc) [errDesc release];
+    if (!binData) return NO;
+    return [binData writeToFile:path atomically:YES];
+}
+
+- (void)cachePlaylistTracksInMemoryLocked:(NSArray *)tracks forPlaylistId:(NSString *)playlistId {
+    if ([playlistId length] == 0 || [tracks count] == 0) return;
+    NSArray *copy = [[tracks copy] autorelease];
+    [_playlistTrackLRU setObject:copy forKey:playlistId];
+    [_playlistTrackLRUOrder removeObject:playlistId];
+    [_playlistTrackLRUOrder addObject:playlistId];
+    while ([_playlistTrackLRUOrder count] > 3) {
+        NSString *evict = [_playlistTrackLRUOrder objectAtIndex:0];
+        [_playlistTrackLRU removeObjectForKey:evict];
+        [_playlistTrackLRUOrder removeObjectAtIndex:0];
+    }
 }
 
 - (NSArray *)cachedLikedSongs {
@@ -572,6 +617,7 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
     @synchronized(self) {
         [_cachedLikedSongs release];
         _cachedLikedSongs = [songs copy];
+        [self rebuildLikedIdsLocked];
         [_cachedPlaylists release];
         _cachedPlaylists = [pls copy];
         _lastSyncTime = [[d objectForKey:@"lastSyncTime"] doubleValue];
@@ -592,13 +638,16 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
                              plDicts, @"playlists",
                              [NSNumber numberWithDouble:ts], @"lastSyncTime",
                              nil];
-    [payload writeToFile:el_library_cache_path() atomically:YES];
+    el_write_binary_plist(payload, el_library_cache_path());
 }
 
 - (void)clearLibraryCache {
     @synchronized(self) {
         [_cachedLikedSongs release]; _cachedLikedSongs = [[NSArray alloc] init];
+        [_cachedLikedIds release];   _cachedLikedIds = [[NSSet alloc] init];
         [_cachedPlaylists release];  _cachedPlaylists = [[NSArray alloc] init];
+        [_playlistTrackLRU removeAllObjects];
+        [_playlistTrackLRUOrder removeAllObjects];
         _lastSyncTime = 0;
     }
     NSFileManager *fm = [[[NSFileManager alloc] init] autorelease];
@@ -609,6 +658,14 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
 
 - (NSArray *)cachedTracksForPlaylistId:(NSString *)playlistId {
     if ([playlistId length] == 0) return nil;
+    @synchronized(self) {
+        NSArray *mem = [_playlistTrackLRU objectForKey:playlistId];
+        if (mem) {
+            [_playlistTrackLRUOrder removeObject:playlistId];
+            [_playlistTrackLRUOrder addObject:playlistId];
+            return [[mem retain] autorelease];
+        }
+    }
     NSString *fname = [NSString stringWithFormat:@"%@.plist", el_sanitize_playlist_filename(playlistId)];
     NSString *path = [el_playlists_cache_dir() stringByAppendingPathComponent:fname];
     NSArray *arr = [NSArray arrayWithContentsOfFile:path];
@@ -618,11 +675,18 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
         ELTrack *t = [ELTrack trackFromDictionary:item];
         if (t && [t.videoId length] > 0) [tracks addObject:t];
     }
-    return ([tracks count] > 0) ? tracks : nil;
+    if ([tracks count] == 0) return nil;
+    @synchronized(self) {
+        [self cachePlaylistTracksInMemoryLocked:tracks forPlaylistId:playlistId];
+    }
+    return tracks;
 }
 
 - (void)saveCachedTracks:(NSArray *)tracks forPlaylistId:(NSString *)playlistId {
     if ([playlistId length] == 0 || [tracks count] == 0) return;
+    @synchronized(self) {
+        [self cachePlaylistTracksInMemoryLocked:tracks forPlaylistId:playlistId];
+    }
     NSMutableArray *arr = [NSMutableArray arrayWithCapacity:[tracks count]];
     for (ELTrack *t in tracks) {
         NSDictionary *d = [t toDictionary];
@@ -630,7 +694,7 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
     }
     NSString *fname = [NSString stringWithFormat:@"%@.plist", el_sanitize_playlist_filename(playlistId)];
     NSString *path = [el_playlists_cache_dir() stringByAppendingPathComponent:fname];
-    [arr writeToFile:path atomically:YES];
+    el_write_binary_plist(arr, path);
 }
 
 - (void)postLibraryUpdatedOnMain {
@@ -660,6 +724,7 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
         return nil;
     }
     NSDictionary *json = [ELJSON youtubeObjectWithData:resp.body];
+    resp.body = nil;
     BOOL badDict = (!allowEmpty200 && ![json isKindOfClass:[NSDictionary class]]);
     if (resp.statusCode >= 400 || badDict) {
         NSDictionary *errObj = [ELJSON dict:json forKey:@"error"];
@@ -1167,6 +1232,7 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
     @synchronized(self) {
         [_cachedLikedSongs release];
         _cachedLikedSongs = liked ? [liked copy] : [[NSArray alloc] init];
+        [self rebuildLikedIdsLocked];
         [_cachedPlaylists release];
         _cachedPlaylists = [playlists copy];
         _lastSyncTime = [[NSDate date] timeIntervalSince1970];
@@ -1180,11 +1246,8 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
 - (BOOL)isTrackLiked:(NSString *)videoId {
     if (!el_is_valid_video_id(videoId)) return NO;
     @synchronized(self) {
-        for (ELTrack *t in _cachedLikedSongs) {
-            if ([t.videoId isEqualToString:videoId]) return YES;
-        }
+        return [_cachedLikedIds containsObject:videoId];
     }
-    return NO;
 }
 
 - (BOOL)setLiked:(BOOL)liked forTrack:(ELTrack *)track error:(NSString **)outError {
@@ -1214,6 +1277,7 @@ static void el_collect_playlists_recursive(id node, NSMutableArray *outPlaylists
         }
         [_cachedLikedSongs release];
         _cachedLikedSongs = [updated copy];
+        [self rebuildLikedIdsLocked];
     }
 
     [self saveLibraryCache];

@@ -24,6 +24,7 @@ static inline BOOL el_is_valid_video_id(NSString *videoId) {
     NSInteger _durationSeconds;
     NSString *_thumbURL;
     NSString *_artURL;
+    NSString *_subtitleText;
 }
 
 @property (nonatomic, copy) NSString *videoId;
@@ -34,6 +35,7 @@ static inline BOOL el_is_valid_video_id(NSString *videoId) {
 @property (nonatomic, assign) NSInteger durationSeconds;
 @property (nonatomic, copy) NSString *thumbURL;
 @property (nonatomic, copy) NSString *artURL;
+@property (nonatomic, readonly) NSString *subtitleText;
 
 - (NSDictionary *)toDictionary;
 + (ELTrack *)trackFromDictionary:(NSDictionary *)dict;

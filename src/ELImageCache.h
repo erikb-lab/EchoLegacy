@@ -1,6 +1,10 @@
 #import <UIKit/UIKit.h>
+#include <pthread.h>
 
 @interface ELImageCache : NSObject {
+    pthread_mutex_t _memLock;
+    pthread_mutex_t _queueLock;
+    pthread_mutex_t _diskLock;
     NSMutableDictionary *_memCache;
     NSMutableArray *_lruKeys;
     NSMutableSet *_inFlight;
@@ -8,10 +12,14 @@
     NSInteger _activeThumbWorkers;
     NSInteger _diskWritesSincePrune;
     BOOL _isPruningDiskCache;
+    unsigned long long _diskCacheBytes;
     NSString *_diskDir;
 }
 
 + (ELImageCache *)sharedCache;
+
+/* RAM-only lookup (zero disk I/O; safe on main thread) */
+- (UIImage *)memoryCachedImageForURL:(NSString *)urlString;
 
 /* Returns cached image immediately if in memory/disk, else nil */
 - (UIImage *)cachedImageForURL:(NSString *)urlString;
@@ -24,6 +32,14 @@
                            videoId:(NSString *)videoId
                               size:(CGFloat)size
                             radius:(CGFloat)radius
+                            target:(id)target
+                            action:(SEL)action;
+
+- (void)loadRoundedThumbnailForURL:(NSString *)urlString
+                           videoId:(NSString *)videoId
+                              size:(CGFloat)size
+                            radius:(CGFloat)radius
+                        matteColor:(UIColor *)matteColor
                             target:(id)target
                             action:(SEL)action;
 

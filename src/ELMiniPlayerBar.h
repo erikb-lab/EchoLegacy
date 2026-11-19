@@ -14,10 +14,12 @@
 #if EL_FEATURE_LIKES
     UIButton *_likeBtn;
     BOOL _isLiked;
+    NSInteger _lastLikeVisualState;
     NSInteger _likeRequestGen;
     NSString *_inFlightLikeVideoId;
 #endif
     UIButton *_playPauseBtn;
+    NSInteger _lastPlayIconState;
     UIActivityIndicatorView *_spinner;
     NSString *_loadedArtKey;
     NSString *_loadedArtURL;

@@ -2,24 +2,30 @@
 #import "ELFeatures.h"
 #import "ELTrack.h"
 
+@class ELTrackCellContentView;
+
 @interface ELTrackCell : UITableViewCell {
-    UIImageView *_cardBgView;
+    ELTrackCellContentView *_rowView;
     UIImageView *_artView;
-    UILabel *_titleLabel;
-    UILabel *_subtitleLabel;
 #if EL_FEATURE_DOWNLOADS
-    UIButton *_downloadBtn;
+    UIButton *_downloadHitBtn;
+    NSInteger _dlState;
+    NSInteger _dlPct;
 #endif
     NSString *_currentVideoId;
     NSString *_currentThumbURL;
+    NSString *_titleText;
+    NSString *_subtitleText;
     ELTrack *_track;
     BOOL _isActiveBg;
-    BOOL _bgInitialized;
+    BOOL _isCurrent;
+    BOOL _currentInitialized;
 }
 
 @property (nonatomic, readonly) NSString *videoId;
 
 - (void)configureWithTrack:(ELTrack *)track isCurrent:(BOOL)isCurrent;
+- (void)setCurrent:(BOOL)isCurrent;
 - (void)refreshDownloadState;
 
 @end

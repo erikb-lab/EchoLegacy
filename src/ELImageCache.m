@@ -23,6 +23,7 @@ static double el_image_worker_priority(BOOL isThumb) {
 #define EL_MAX_THUMB_QUEUE      18
 #define EL_MAX_IMAGE_BYTES      (2U * 1024U * 1024U)
 #define EL_MAX_IMAGE_DIMENSION  2048U
+#define EL_MAX_DECODED_ART_DIM  320U
 #define EL_MAX_DISK_CACHE_BYTES (16ULL * 1024ULL * 1024ULL)
 #define EL_DISK_CACHE_TARGET    (12ULL * 1024ULL * 1024ULL)
 
@@ -84,6 +85,50 @@ static BOOL el_is_valid_decoded_image(UIImage *img) {
     return YES;
 }
 
+/* Force-decodes & downscales full artwork off-main-thread into native opaque BGRX (<= maxDim px) */
+static UIImage *el_force_decode_opaque_image(UIImage *src, size_t maxDim) {
+    if (!el_is_valid_decoded_image(src)) return nil;
+    CGImageRef cg = [src CGImage];
+    size_t srcW = CGImageGetWidth(cg);
+    size_t srcH = CGImageGetHeight(cg);
+
+    size_t dstW = srcW;
+    size_t dstH = srcH;
+    if (dstW > maxDim || dstH > maxDim) {
+        if (dstW >= dstH) {
+            dstH = (size_t)((double)dstH * (double)maxDim / (double)dstW + 0.5);
+            dstW = maxDim;
+        } else {
+            dstW = (size_t)((double)dstW * (double)maxDim / (double)dstH + 0.5);
+            dstH = maxDim;
+        }
+        if (dstW == 0) dstW = 1;
+        if (dstH == 0) dstH = 1;
+    }
+
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    if (!cs) return src;
+    CGContextRef ctx = CGBitmapContextCreate(NULL,
+                                             dstW,
+                                             dstH,
+                                             8,
+                                             dstW * 4,
+                                             cs,
+                                             kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little);
+    CGColorSpaceRelease(cs);
+    if (!ctx) return src;
+
+    CGContextSetInterpolationQuality(ctx, kCGInterpolationMedium);
+    CGContextDrawImage(ctx, CGRectMake(0.0f, 0.0f, (CGFloat)dstW, (CGFloat)dstH), cg);
+    CGImageRef decodedCG = CGBitmapContextCreateImage(ctx);
+    CGContextRelease(ctx);
+    if (!decodedCG) return src;
+
+    UIImage *out = [UIImage imageWithCGImage:decodedCG];
+    CGImageRelease(decodedCG);
+    return out ? out : src;
+}
+
 static NSInteger el_compare_cache_entry_mtime(id a, id b, void *ctx) {
     (void)ctx;
     long long ta = [[(NSDictionary *)a objectForKey:@"mtime"] longLongValue];
@@ -106,11 +151,16 @@ static NSInteger el_compare_cache_entry_mtime(id a, id b, void *ctx) {
 - (id)init {
     self = [super init];
     if (self) {
+        pthread_mutex_init(&_memLock, NULL);
+        pthread_mutex_init(&_queueLock, NULL);
+        pthread_mutex_init(&_diskLock, NULL);
+
         _memCache = [[NSMutableDictionary alloc] init];
         _lruKeys = [[NSMutableArray alloc] init];
         _inFlight = [[NSMutableSet alloc] init];
         _thumbQueue = [[NSMutableArray alloc] init];
         _activeThumbWorkers = 0;
+        _diskCacheBytes = 0;
 
         NSArray *paths = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
         NSString *caches = ([paths count] > 0) ? [paths objectAtIndex:0] : NSTemporaryDirectory();
@@ -124,6 +174,8 @@ static NSInteger el_compare_cache_entry_mtime(id a, id b, void *ctx) {
                                                  selector:@selector(clearMemoryCache)
                                                      name:UIApplicationDidReceiveMemoryWarningNotification
                                                    object:nil];
+
+        [NSThread detachNewThreadSelector:@selector(seedDiskCacheBytesWorker) toTarget:self withObject:nil];
     }
     return self;
 }
@@ -135,38 +187,65 @@ static NSInteger el_compare_cache_entry_mtime(id a, id b, void *ctx) {
     [_inFlight release];
     [_thumbQueue release];
     [_diskDir release];
+    pthread_mutex_destroy(&_memLock);
+    pthread_mutex_destroy(&_queueLock);
+    pthread_mutex_destroy(&_diskLock);
     [super dealloc];
 }
 
-- (void)clearMemoryCache {
-    @synchronized(self) {
-        [_memCache removeAllObjects];
-        [_lruKeys removeAllObjects];
-    }
-}
-
-- (unsigned long long)diskCacheBytes {
-    NSFileManager *fm = [NSFileManager defaultManager];
+- (void)seedDiskCacheBytesWorker {
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    [NSThread setThreadPriority:0.15];
+    NSFileManager *fm = [[[NSFileManager alloc] init] autorelease];
     NSArray *files = [fm contentsOfDirectoryAtPath:_diskDir error:nil];
     unsigned long long total = 0;
     for (NSString *f in files) {
-        NSDictionary *attrs = [fm attributesOfItemAtPath:[_diskDir stringByAppendingPathComponent:f] error:nil];
-        total += [[attrs objectForKey:NSFileSize] unsignedLongLongValue];
+        NSString *full = [_diskDir stringByAppendingPathComponent:f];
+        struct stat st;
+        if (lstat([full fileSystemRepresentation], &st) == 0 && S_ISREG(st.st_mode)) {
+            total += (unsigned long long)st.st_size;
+        }
     }
+    pthread_mutex_lock(&_diskLock);
+    _diskCacheBytes = total;
+    pthread_mutex_unlock(&_diskLock);
+    [pool release];
+}
+
+- (void)clearMemoryCache {
+    pthread_mutex_lock(&_memLock);
+    [_memCache removeAllObjects];
+    [_lruKeys removeAllObjects];
+    pthread_mutex_unlock(&_memLock);
+}
+
+- (unsigned long long)diskCacheBytes {
+    pthread_mutex_lock(&_diskLock);
+    unsigned long long total = _diskCacheBytes;
+    pthread_mutex_unlock(&_diskLock);
     return total;
+}
+
+- (void)clearDiskCacheWorker {
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    [NSThread setThreadPriority:0.25];
+    NSFileManager *fm = [[[NSFileManager alloc] init] autorelease];
+    NSArray *files = [fm contentsOfDirectoryAtPath:_diskDir error:nil];
+    for (NSString *f in files) {
+        NSString *full = [_diskDir stringByAppendingPathComponent:f];
+        unlink([full fileSystemRepresentation]);
+    }
+    [pool release];
 }
 
 - (unsigned long long)clearAllCache {
     [self clearMemoryCache];
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSArray *files = [fm contentsOfDirectoryAtPath:_diskDir error:nil];
-    unsigned long long freed = 0;
-    for (NSString *f in files) {
-        NSString *full = [_diskDir stringByAppendingPathComponent:f];
-        NSDictionary *attrs = [fm attributesOfItemAtPath:full error:nil];
-        freed += [[attrs objectForKey:NSFileSize] unsignedLongLongValue];
-        [fm removeItemAtPath:full error:nil];
-    }
+    pthread_mutex_lock(&_diskLock);
+    unsigned long long freed = _diskCacheBytes;
+    _diskCacheBytes = 0;
+    _diskWritesSincePrune = 0;
+    pthread_mutex_unlock(&_diskLock);
+    [NSThread detachNewThreadSelector:@selector(clearDiskCacheWorker) toTarget:self withObject:nil];
     return freed;
 }
 
@@ -177,24 +256,23 @@ static NSInteger el_compare_cache_entry_mtime(id a, id b, void *ctx) {
 
 - (void)enforceDiskCacheQuota {
     BOOL shouldRun = NO;
-    @synchronized(self) {
-        if (!_isPruningDiskCache) {
-            _isPruningDiskCache = YES;
-            shouldRun = YES;
-        }
+    pthread_mutex_lock(&_diskLock);
+    if (!_isPruningDiskCache) {
+        _isPruningDiskCache = YES;
+        shouldRun = YES;
     }
+    pthread_mutex_unlock(&_diskLock);
     if (!shouldRun) return;
 
-    /* Run directory scan & lstat outside @synchronized(self) so UI/thumbnail reads never stall */
+    unsigned long long total = 0;
     NSFileManager *fm = [[[NSFileManager alloc] init] autorelease];
     NSArray *files = [fm contentsOfDirectoryAtPath:_diskDir error:nil];
     if ([files count] > 0) {
-        unsigned long long total = 0;
         NSMutableArray *entries = [NSMutableArray arrayWithCapacity:[files count]];
         for (NSString *f in files) {
             NSString *full = [_diskDir stringByAppendingPathComponent:f];
             struct stat st;
-            if (lstat([full UTF8String], &st) == 0 && S_ISREG(st.st_mode)) {
+            if (lstat([full fileSystemRepresentation], &st) == 0 && S_ISREG(st.st_mode)) {
                 unsigned long long fsz = (unsigned long long)st.st_size;
                 total += fsz;
                 [entries addObject:[NSDictionary dictionaryWithObjectsAndKeys:
@@ -210,124 +288,143 @@ static NSInteger el_compare_cache_entry_mtime(id a, id b, void *ctx) {
                 if (total <= EL_DISK_CACHE_TARGET) break;
                 NSString *p = [entry objectForKey:@"path"];
                 unsigned long long sz = [[entry objectForKey:@"size"] unsignedLongLongValue];
-                if (unlink([p UTF8String]) == 0) {
+                if (unlink([p fileSystemRepresentation]) == 0) {
                     total = (total > sz) ? (total - sz) : 0;
                 }
             }
         }
     }
 
-    @synchronized(self) {
-        _isPruningDiskCache = NO;
-    }
+    pthread_mutex_lock(&_diskLock);
+    _diskCacheBytes = total;
+    _isPruningDiskCache = NO;
+    pthread_mutex_unlock(&_diskLock);
 }
 
 - (void)storeInMemory:(UIImage *)img forKey:(NSString *)urlString {
     if (!el_is_valid_decoded_image(img) || !urlString) return;
-    @synchronized(self) {
-        [_memCache setObject:img forKey:urlString];
-        [_lruKeys removeObject:urlString];
-        [_lruKeys addObject:urlString];
-        while ([_lruKeys count] > EL_MAX_MEM_IMAGES) {
-            NSString *evict = [_lruKeys objectAtIndex:0];
-            [_memCache removeObjectForKey:evict];
-            [_lruKeys removeObjectAtIndex:0];
-        }
+    pthread_mutex_lock(&_memLock);
+    [_memCache setObject:img forKey:urlString];
+    [_lruKeys removeObject:urlString];
+    [_lruKeys addObject:urlString];
+    while ([_lruKeys count] > EL_MAX_MEM_IMAGES) {
+        NSString *evict = [_lruKeys objectAtIndex:0];
+        [_memCache removeObjectForKey:evict];
+        [_lruKeys removeObjectAtIndex:0];
     }
-}
-
-- (UIImage *)cachedImageForURL:(NSString *)urlString {
-    if (!ELValidateHTTPSURL(urlString, ELHostCategoryThumbnail, NULL, NULL, NULL)) return nil;
-    @synchronized(self) {
-        UIImage *img = [_memCache objectForKey:urlString];
-        if (img) return [[img retain] autorelease];
-    }
-    NSString *path = [self diskPathForURL:urlString];
-    if (path && [[NSFileManager defaultManager] fileExistsAtPath:path]) {
-        NSData *raw = [NSData dataWithContentsOfFile:path];
-        if (!el_is_valid_image_magic(raw)) {
-            unlink([path UTF8String]);
-            return nil;
-        }
-        UIImage *img = [UIImage imageWithData:raw];
-        if (el_is_valid_decoded_image(img)) {
-            utimes([path UTF8String], NULL);
-            [self storeInMemory:img forKey:urlString];
-            return img;
-        } else {
-            unlink([path UTF8String]);
-        }
-    }
-    return nil;
+    pthread_mutex_unlock(&_memLock);
 }
 
 - (UIImage *)memoryCachedImageForURL:(NSString *)urlString {
     if ([urlString length] == 0) return nil;
-    @synchronized(self) {
-        UIImage *img = [_memCache objectForKey:urlString];
-        if (img) return [[img retain] autorelease];
+    UIImage *img = nil;
+    pthread_mutex_lock(&_memLock);
+    img = [_memCache objectForKey:urlString];
+    if (img) [[img retain] autorelease];
+    pthread_mutex_unlock(&_memLock);
+    return img;
+}
+
+- (UIImage *)cachedImageForURL:(NSString *)urlString {
+    if (!ELValidateHTTPSURL(urlString, ELHostCategoryThumbnail, NULL, NULL, NULL)) return nil;
+    UIImage *hit = [self memoryCachedImageForURL:urlString];
+    if (hit) return hit;
+
+    NSString *path = [self diskPathForURL:urlString];
+    const char *cpath = path ? [path fileSystemRepresentation] : NULL;
+    if (cpath && access(cpath, R_OK) == 0) {
+        NSData *raw = [NSData dataWithContentsOfFile:path];
+        if (!el_is_valid_image_magic(raw)) {
+            unlink(cpath);
+            return nil;
+        }
+        UIImage *img = el_force_decode_opaque_image([UIImage imageWithData:raw], EL_MAX_DECODED_ART_DIM);
+        if (img) {
+            utimes(cpath, NULL);
+            [self storeInMemory:img forKey:urlString];
+            return img;
+        }
+        unlink(cpath);
     }
     return nil;
 }
 
-- (NSData *)downloadImageDataSyncForURL:(NSString *)urlString {
+/* Fetches raw validated image bytes (disk or HTTPS) without polluting _memCache */
+- (NSData *)fetchRawImageDataSyncForURL:(NSString *)urlString {
     if (!ELValidateHTTPSURL(urlString, ELHostCategoryThumbnail, NULL, NULL, NULL)) return nil;
     NSString *path = [self diskPathForURL:urlString];
-    if (path && [[NSFileManager defaultManager] fileExistsAtPath:path]) {
+    const char *cpath = path ? [path fileSystemRepresentation] : NULL;
+    if (cpath && access(cpath, R_OK) == 0) {
         NSData *existing = [NSData dataWithContentsOfFile:path];
         if (el_is_valid_image_magic(existing)) {
-            UIImage *diskImg = [UIImage imageWithData:existing];
-            if (el_is_valid_decoded_image(diskImg)) {
-                utimes([path UTF8String], NULL);
-                [self storeInMemory:diskImg forKey:urlString];
+            UIImage *probe = [UIImage imageWithData:existing];
+            if (el_is_valid_decoded_image(probe)) {
+                utimes(cpath, NULL);
                 return existing;
             }
         }
-        unlink([path UTF8String]);
+        unlink(cpath);
     }
+
     ELHTTPResponse *resp = [[ELHTTPClient sharedClient] getURL:urlString
                                                        headers:nil
                                                       maxBytes:EL_MAX_IMAGE_BYTES];
-    if (resp && resp.statusCode == 200 &&
-        el_is_valid_image_content_type(resp.headers) &&
-        el_is_valid_image_magic(resp.body)) {
-        UIImage *decoded = [UIImage imageWithData:resp.body];
-        if (!el_is_valid_decoded_image(decoded)) {
-            return nil;
+    if (!resp || resp.statusCode != 200 ||
+        !el_is_valid_image_content_type(resp.headers) ||
+        !el_is_valid_image_magic(resp.body)) {
+        return nil;
+    }
+
+    UIImage *probe = [UIImage imageWithData:resp.body];
+    if (!el_is_valid_decoded_image(probe)) {
+        return nil;
+    }
+
+    if (path) {
+        struct stat prevSt;
+        unsigned long long prevSize = 0;
+        if (cpath && lstat(cpath, &prevSt) == 0 && S_ISREG(prevSt.st_mode)) {
+            prevSize = (unsigned long long)prevSt.st_size;
         }
-        if (path) {
-            [resp.body writeToFile:path atomically:YES];
+        if ([resp.body writeToFile:path atomically:YES]) {
+            unsigned long long newSize = (unsigned long long)[resp.body length];
             BOOL triggerPrune = NO;
-            @synchronized(self) {
-                _diskWritesSincePrune++;
-                if (_diskWritesSincePrune >= 25) {
-                    _diskWritesSincePrune = 0;
-                    triggerPrune = YES;
-                }
+            pthread_mutex_lock(&_diskLock);
+            if (_diskCacheBytes >= prevSize) {
+                _diskCacheBytes -= prevSize;
+            } else {
+                _diskCacheBytes = 0;
             }
+            _diskCacheBytes += newSize;
+            _diskWritesSincePrune++;
+            if (_diskWritesSincePrune >= 25) {
+                _diskWritesSincePrune = 0;
+                triggerPrune = YES;
+            }
+            pthread_mutex_unlock(&_diskLock);
             if (triggerPrune) {
                 [self enforceDiskCacheQuota];
             }
         }
-        [self storeInMemory:decoded forKey:urlString];
-        return resp.body;
     }
-    return nil;
+    return resp.body;
+}
+
+- (NSData *)downloadImageDataSyncForURL:(NSString *)urlString {
+    return [self fetchRawImageDataSyncForURL:urlString];
 }
 
 - (UIImage *)fetchOrCachedImageSyncForURL:(NSString *)urlString {
     if ([urlString length] == 0) return nil;
-    UIImage *img = [self cachedImageForURL:urlString];
+    UIImage *img = [self memoryCachedImageForURL:urlString];
     if (img) return img;
 
-    NSData *data = [self downloadImageDataSyncForURL:urlString];
+    NSData *data = [self fetchRawImageDataSyncForURL:urlString];
     if (!data) return nil;
 
-    /* downloadImageDataSyncForURL already decoded and stored UIImage in _memCache */
-    img = [self memoryCachedImageForURL:urlString];
-    if (!img) {
-        img = [UIImage imageWithData:data];
-        if (img) [self storeInMemory:img forKey:urlString];
+    img = el_force_decode_opaque_image([UIImage imageWithData:data], EL_MAX_DECODED_ART_DIM);
+    if (img) {
+        [self storeInMemory:img forKey:urlString];
     }
     return img;
 }
@@ -340,17 +437,24 @@ static NSInteger el_compare_cache_entry_mtime(id a, id b, void *ctx) {
     SEL action = NSSelectorFromString([info objectForKey:@"action"]);
 
     UIImage *img = [self fetchOrCachedImageSyncForURL:urlString];
-
-    @synchronized(self) {
-        [_inFlight removeObject:urlString];
+    if (img) {
+        /* Precompute dominant backdrop color off-main-thread so Now Playing / Dock Mode hit warm cache */
+        [ELTheme dominantBackdropColorFromImage:img cacheKey:urlString];
     }
+
+    pthread_mutex_lock(&_queueLock);
+    [_inFlight removeObject:urlString];
+    pthread_mutex_unlock(&_queueLock);
 
     if (img && target && [target respondsToSelector:action]) {
         NSDictionary *res = [NSDictionary dictionaryWithObjectsAndKeys:
                              urlString, @"url",
                              img, @"image",
                              nil];
-        [target performSelectorOnMainThread:action withObject:res waitUntilDone:NO];
+        [target performSelectorOnMainThread:action
+                                 withObject:res
+                              waitUntilDone:NO
+                                      modes:[NSArray arrayWithObject:NSDefaultRunLoopMode]];
     }
     [pool release];
 }
@@ -370,10 +474,13 @@ static NSInteger el_compare_cache_entry_mtime(id a, id b, void *ctx) {
         return;
     }
 
-    @synchronized(self) {
-        if ([_inFlight containsObject:urlString]) return;
+    pthread_mutex_lock(&_queueLock);
+    BOOL alreadyInFlight = [_inFlight containsObject:urlString];
+    if (!alreadyInFlight) {
         [_inFlight addObject:urlString];
     }
+    pthread_mutex_unlock(&_queueLock);
+    if (alreadyInFlight) return;
 
     NSDictionary *info = [NSDictionary dictionaryWithObjectsAndKeys:
                           urlString, @"url",
@@ -391,17 +498,18 @@ static NSInteger el_compare_cache_entry_mtime(id a, id b, void *ctx) {
     while (1) {
         NSAutoreleasePool *innerPool = [[NSAutoreleasePool alloc] init];
         NSDictionary *req = nil;
-        @synchronized(self) {
-            NSUInteger count = [_thumbQueue count];
-            if (count == 0) {
-                _activeThumbWorkers--;
-                [innerPool release];
-                break;
-            }
-            /* LIFO: pop most recent request so currently visible cells load first during fast scrolling */
-            req = [[_thumbQueue objectAtIndex:count - 1] retain];
-            [_thumbQueue removeObjectAtIndex:count - 1];
+        pthread_mutex_lock(&_queueLock);
+        NSUInteger count = [_thumbQueue count];
+        if (count == 0) {
+            _activeThumbWorkers--;
+            pthread_mutex_unlock(&_queueLock);
+            [innerPool release];
+            break;
         }
+        /* LIFO: pop most recent request so currently visible cells load first during fast scrolling */
+        req = [[_thumbQueue objectAtIndex:count - 1] retain];
+        [_thumbQueue removeObjectAtIndex:count - 1];
+        pthread_mutex_unlock(&_queueLock);
 
         double targetPrio = el_image_worker_priority(YES);
         if (targetPrio != lastPrio) {
@@ -414,13 +522,14 @@ static NSInteger el_compare_cache_entry_mtime(id a, id b, void *ctx) {
         NSString *cacheKey = [req objectForKey:@"cacheKey"];
         CGFloat size = [[req objectForKey:@"size"] floatValue];
         CGFloat radius = [[req objectForKey:@"radius"] floatValue];
+        UIColor *matteColor = [req objectForKey:@"matteColor"];
         id target = [req objectForKey:@"target"];
         SEL action = NSSelectorFromString([req objectForKey:@"action"]);
 
-        UIImage *roundedImg = [ELTheme cachedRoundedThumbnailForSize:size radius:radius cacheKey:cacheKey];
+        UIImage *roundedImg = [ELTheme cachedRoundedThumbnailForSize:size radius:radius matteColor:matteColor cacheKey:cacheKey];
         if (!roundedImg && [videoId length] > 0) {
             NSString *localKey = [NSString stringWithFormat:@"local:%@", videoId];
-            roundedImg = [ELTheme cachedRoundedThumbnailForSize:size radius:radius cacheKey:localKey];
+            roundedImg = [ELTheme cachedRoundedThumbnailForSize:size radius:radius matteColor:matteColor cacheKey:localKey];
         }
 
         if (!roundedImg) {
@@ -429,10 +538,21 @@ static NSInteger el_compare_cache_entry_mtime(id a, id b, void *ctx) {
                 rawImg = [[ELDownloadManager sharedManager] localArtImageForVideoId:videoId];
             }
             if (!rawImg && [urlString length] > 0) {
-                rawImg = [self fetchOrCachedImageSyncForURL:urlString];
+                rawImg = [self memoryCachedImageForURL:urlString];
+                if (!rawImg) {
+                    /* Fetch raw bytes without polluting _memCache with full-size bitmaps */
+                    NSData *rawData = [self fetchRawImageDataSyncForURL:urlString];
+                    if (rawData) {
+                        rawImg = [UIImage imageWithData:rawData];
+                    }
+                }
             }
             if (rawImg) {
-                roundedImg = [ELTheme roundedThumbnailFromImage:rawImg size:size radius:radius cacheKey:cacheKey];
+                roundedImg = [ELTheme roundedThumbnailFromImage:rawImg
+                                                           size:size
+                                                         radius:radius
+                                                     matteColor:matteColor
+                                                       cacheKey:cacheKey];
             }
         }
 
@@ -443,7 +563,10 @@ static NSInteger el_compare_cache_entry_mtime(id a, id b, void *ctx) {
                                  (urlString ? urlString : @""), @"url",
                                  roundedImg, @"image",
                                  nil];
-            [target performSelectorOnMainThread:action withObject:res waitUntilDone:NO];
+            [target performSelectorOnMainThread:action
+                                     withObject:res
+                                  waitUntilDone:NO
+                                          modes:[NSArray arrayWithObject:NSDefaultRunLoopMode]];
         }
 
         [req release];
@@ -459,6 +582,22 @@ static NSInteger el_compare_cache_entry_mtime(id a, id b, void *ctx) {
                             radius:(CGFloat)radius
                             target:(id)target
                             action:(SEL)action {
+    [self loadRoundedThumbnailForURL:urlString
+                             videoId:videoId
+                                size:size
+                              radius:radius
+                          matteColor:[ELTheme surfaceColor]
+                              target:target
+                              action:action];
+}
+
+- (void)loadRoundedThumbnailForURL:(NSString *)urlString
+                           videoId:(NSString *)videoId
+                              size:(CGFloat)size
+                            radius:(CGFloat)radius
+                        matteColor:(UIColor *)matteColor
+                            target:(id)target
+                            action:(SEL)action {
     if (!target || !action) return;
     NSString *safeURL = (urlString ? urlString : @"");
     NSString *safeVid = (videoId ? videoId : @"");
@@ -468,34 +607,37 @@ static NSInteger el_compare_cache_entry_mtime(id a, id b, void *ctx) {
         ? safeURL
         : [NSString stringWithFormat:@"local:%@", safeVid];
 
-    NSDictionary *req = [NSDictionary dictionaryWithObjectsAndKeys:
-                         cacheKey, @"cacheKey",
-                         safeURL, @"url",
-                         safeVid, @"videoId",
-                         [NSNumber numberWithFloat:(float)size], @"size",
-                         [NSNumber numberWithFloat:(float)radius], @"radius",
-                         target, @"target",
-                         NSStringFromSelector(action), @"action",
-                         nil];
+    NSMutableDictionary *req = [NSMutableDictionary dictionaryWithObjectsAndKeys:
+                                cacheKey, @"cacheKey",
+                                safeURL, @"url",
+                                safeVid, @"videoId",
+                                [NSNumber numberWithFloat:(float)size], @"size",
+                                [NSNumber numberWithFloat:(float)radius], @"radius",
+                                target, @"target",
+                                NSStringFromSelector(action), @"action",
+                                nil];
+    if (matteColor) {
+        [req setObject:matteColor forKey:@"matteColor"];
+    }
 
     BOOL spawnWorker = NO;
-    @synchronized(self) {
-        /* Drop any stale pending request for this reused cell target */
-        for (NSInteger i = (NSInteger)[_thumbQueue count] - 1; i >= 0; i--) {
-            NSDictionary *item = [_thumbQueue objectAtIndex:(NSUInteger)i];
-            if ([item objectForKey:@"target"] == target) {
-                [_thumbQueue removeObjectAtIndex:(NSUInteger)i];
-            }
-        }
-        if ([_thumbQueue count] >= EL_MAX_THUMB_QUEUE) {
-            [_thumbQueue removeObjectAtIndex:0];
-        }
-        [_thumbQueue addObject:req];
-        if (_activeThumbWorkers < EL_MAX_THUMB_WORKERS) {
-            _activeThumbWorkers++;
-            spawnWorker = YES;
+    pthread_mutex_lock(&_queueLock);
+    /* Drop any stale pending request for this reused cell target */
+    for (NSInteger i = (NSInteger)[_thumbQueue count] - 1; i >= 0; i--) {
+        NSDictionary *item = [_thumbQueue objectAtIndex:(NSUInteger)i];
+        if ([item objectForKey:@"target"] == target) {
+            [_thumbQueue removeObjectAtIndex:(NSUInteger)i];
         }
     }
+    if ([_thumbQueue count] >= EL_MAX_THUMB_QUEUE) {
+        [_thumbQueue removeObjectAtIndex:0];
+    }
+    [_thumbQueue addObject:req];
+    if (_activeThumbWorkers < EL_MAX_THUMB_WORKERS) {
+        _activeThumbWorkers++;
+        spawnWorker = YES;
+    }
+    pthread_mutex_unlock(&_queueLock);
 
     if (spawnWorker) {
         [NSThread detachNewThreadSelector:@selector(thumbWorkerLoop) toTarget:self withObject:nil];

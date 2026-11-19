@@ -31,6 +31,8 @@
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [_tableView release]; _tableView = nil;
     [_emptyLabel release]; _emptyLabel = nil;
+    [_downloadsHeader release]; _downloadsHeader = nil;
+    [_downloadsInfoLabel release]; _downloadsInfoLabel = nil;
 #if EL_FEATURE_LOCAL_PLAYLISTS
     [_newPlaylistBar release]; _newPlaylistBar = nil;
     [_newPlaylistField release]; _newPlaylistField = nil;
@@ -153,50 +155,64 @@
                                                           lines:3] retain];
     [self.view addSubview:_emptyLabel];
 
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refreshDownloads) name:ELDownloadsChangedNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onDataChanged) name:ELDownloadsChangedNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reloadTable) name:ELPlayerStateChangedNotification object:nil];
 #if EL_FEATURE_LOCAL_PLAYLISTS
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refreshDownloads) name:ELLocalPlaylistsChangedNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onDataChanged) name:ELLocalPlaylistsChangedNotification object:nil];
 #endif
 
     [self refreshDownloads];
 }
 
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    if (_needsRefresh) {
+        _needsRefresh = NO;
+        [self refreshDownloads];
+    }
+}
+
 - (void)reloadTable {
-    [_tableView reloadData];
+    if (!self.view.window) {
+        _needsRefresh = YES;
+        return;
+    }
+    [ELTrackListHelper refreshVisibleTrackHighlightInTableView:_tableView];
 }
 
 - (UIView *)buildDownloadsHeader {
-    UIView *hdr = [[[UIView alloc] initWithFrame:CGRectMake(0.0f, 0.0f, 320.0f, 78.0f)] autorelease];
-    hdr.backgroundColor = [ELTheme backgroundColor];
-    hdr.opaque = YES;
+    if (!_downloadsHeader) {
+        _downloadsHeader = [[UIView alloc] initWithFrame:CGRectMake(0.0f, 0.0f, 320.0f, 78.0f)];
+        _downloadsHeader.backgroundColor = [ELTheme backgroundColor];
+        _downloadsHeader.opaque = YES;
+
+        _downloadsInfoLabel = [[UILabel alloc] initWithFrame:CGRectMake(14.0f, 6.0f, 292.0f, 18.0f)];
+        _downloadsInfoLabel.backgroundColor = [ELTheme backgroundColor];
+        _downloadsInfoLabel.opaque = YES;
+        _downloadsInfoLabel.font = [UIFont systemFontOfSize:12.0f];
+        _downloadsInfoLabel.textColor = [ELTheme textSecondaryColor];
+        [_downloadsHeader addSubview:_downloadsInfoLabel];
+
+        UIButton *playBtn = [ELTheme pillButtonWithTitle:@"Play All"
+                                                   color:[ELTheme accentColor]
+                                                   frame:CGRectMake(14.0f, 30.0f, 140.0f, 36.0f)];
+        [playBtn addTarget:self action:@selector(onPlayAll) forControlEvents:UIControlEventTouchUpInside];
+        [_downloadsHeader addSubview:playBtn];
+
+        UIButton *shufBtn = [ELTheme pillButtonWithTitle:@"Shuffle"
+                                                   color:[ELTheme surfaceHighlightColor]
+                                                   frame:CGRectMake(166.0f, 30.0f, 140.0f, 36.0f)];
+        [shufBtn addTarget:self action:@selector(onShuffleAll) forControlEvents:UIControlEventTouchUpInside];
+        [_downloadsHeader addSubview:shufBtn];
+    }
 
     unsigned long long bytes = [[ELDownloadManager sharedManager] totalDownloadedBytes];
     double mb = (double)bytes / (1024.0 * 1024.0);
-    UILabel *info = [[[UILabel alloc] initWithFrame:CGRectMake(14.0f, 6.0f, 292.0f, 18.0f)] autorelease];
-    info.backgroundColor = [ELTheme backgroundColor];
-    info.opaque = YES;
-    info.font = [UIFont systemFontOfSize:12.0f];
-    info.textColor = [ELTheme textSecondaryColor];
-    info.text = [NSString stringWithFormat:@"%lu offline %@  •  %.1f MB stored locally",
-                 (unsigned long)[_tracks count],
-                 ([_tracks count] == 1 ? @"track" : @"tracks"),
-                 mb];
-    [hdr addSubview:info];
-
-    UIButton *playBtn = [ELTheme pillButtonWithTitle:@"Play All"
-                                               color:[ELTheme accentColor]
-                                               frame:CGRectMake(14.0f, 30.0f, 140.0f, 36.0f)];
-    [playBtn addTarget:self action:@selector(onPlayAll) forControlEvents:UIControlEventTouchUpInside];
-    [hdr addSubview:playBtn];
-
-    UIButton *shufBtn = [ELTheme pillButtonWithTitle:@"Shuffle"
-                                               color:[ELTheme surfaceHighlightColor]
-                                               frame:CGRectMake(166.0f, 30.0f, 140.0f, 36.0f)];
-    [shufBtn addTarget:self action:@selector(onShuffleAll) forControlEvents:UIControlEventTouchUpInside];
-    [hdr addSubview:shufBtn];
-
-    return hdr;
+    _downloadsInfoLabel.text = [NSString stringWithFormat:@"%lu offline %@  •  %.1f MB stored locally",
+                                (unsigned long)[_tracks count],
+                                ([_tracks count] == 1 ? @"track" : @"tracks"),
+                                mb];
+    return _downloadsHeader;
 }
 
 - (void)onPlayAll {
@@ -205,6 +221,14 @@
 
 - (void)onShuffleAll {
     if ([_tracks count] > 0) [[ELAudioEngine sharedEngine] playTracksShuffled:_tracks];
+}
+
+- (void)onDataChanged {
+    if (!self.view.window) {
+        _needsRefresh = YES;
+        return;
+    }
+    [self refreshDownloads];
 }
 
 - (void)refreshDownloads {

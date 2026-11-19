@@ -1,11 +1,20 @@
 #import <UIKit/UIKit.h>
+#include <pthread.h>
 #import "ELTrack.h"
 
 extern NSString *const ELDownloadsChangedNotification;
 extern NSString *const ELDownloadProgressNotification; /* userInfo: videoId, progress (NSNumber float) */
 extern NSString *const ELDownloadBatchProgressNotification; /* userInfo: title, total, completed, active */
 
+typedef enum {
+    ELDownloadStateNone = 0,
+    ELDownloadStateQueued,
+    ELDownloadStateDownloading,
+    ELDownloadStateDownloaded
+} ELDownloadState;
+
 @interface ELDownloadManager : NSObject {
+    pthread_mutex_t _stateLock;
     NSMutableArray *_tracks;
     NSMutableSet *_downloadedIds;
     NSMutableArray *_pendingQueue;
@@ -18,9 +27,15 @@ extern NSString *const ELDownloadBatchProgressNotification; /* userInfo: title, 
     NSString *_batchTitle;
     NSInteger _batchTotal;
     NSInteger _batchCompleted;
+    unsigned long long _totalDownloadedBytes;
     BOOL _isBackgrounded;
     NSString *_downloadsDir;
     UIBackgroundTaskIdentifier _dlBgTask;
+    NSCondition *_ioCond;
+    NSArray *_pendingIndexSnapshot;
+    NSMutableArray *_pendingDeleteIds;
+    BOOL _needsBytesSeed;
+    BOOL _ioThreadStarted;
 }
 
 + (ELDownloadManager *)sharedManager;
@@ -30,6 +45,7 @@ extern NSString *const ELDownloadBatchProgressNotification; /* userInfo: title, 
 @property (nonatomic, readonly) BOOL isBatchDownloading;
 
 - (NSArray *)downloadedTracks;
+- (ELDownloadState)stateForVideoId:(NSString *)videoId progress:(float *)outProgress;
 - (BOOL)isDownloaded:(NSString *)videoId;
 - (BOOL)isDownloading:(NSString *)videoId;
 - (BOOL)isQueued:(NSString *)videoId;

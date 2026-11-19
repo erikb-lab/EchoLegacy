@@ -11,9 +11,13 @@
     UILabel *_headerInfoLabel;
 #if EL_FEATURE_DOWNLOADS
     UIButton *_downloadPlaylistBtn;
+    NSInteger _dlBtnState;
+    NSInteger _dlBtnCompleted;
+    NSInteger _dlBtnTotal;
 #endif
     NSInteger _loadGen;
     BOOL _isLoadingMore;
+    BOOL _needsRefresh;
 }
 
 - (id)initWithPlaylist:(ELPlaylist *)playlist;

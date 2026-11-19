@@ -44,6 +44,9 @@ typedef BOOL (*ELHTTPStreamCallback)(const uint8_t *bytes, NSUInteger length,
 /* Reloads the bundle's cacert.pem trust store and clears cached TLS sessions. */
 + (BOOL)reloadTrustStore;
 
+/* Closes and clears all idle keep-alive TLS connections (e.g. on memory warning or background). */
++ (void)clearKeepAlivePool;
+
 /* Returns clock-drift-compensated UTC epoch seconds (synced from verified HTTPS Date headers). */
 + (NSTimeInterval)syncedCurrentTime;
 

@@ -56,22 +56,28 @@ static void el_save_history_array(NSArray *queries) {
         _recentQueries = [[NSMutableArray alloc] init];
         _searchCache = [[NSMutableDictionary alloc] initWithCapacity:8];
         _searchCacheLRU = [[NSMutableArray alloc] initWithCapacity:8];
-        NSString *histPath = el_history_path();
-        if ([[NSFileManager defaultManager] fileExistsAtPath:histPath]) {
-            el_harden_history_path(histPath, 0600, NO);
-        }
-        NSArray *saved = [NSArray arrayWithContentsOfFile:histPath];
-        if ([saved isKindOfClass:[NSArray class]]) {
-            for (id item in saved) {
-                if ([item isKindOfClass:[NSString class]] && [item length] > 0 && [item length] <= 128) {
-                    [_recentQueries addObject:item];
-                    if ([_recentQueries count] >= 10) break;
-                }
-            }
-        }
         _showingHistory = YES;
+        _historyLoaded = NO;
     }
     return self;
+}
+
+- (void)loadHistoryIfNeeded {
+    if (_historyLoaded) return;
+    _historyLoaded = YES;
+    NSString *histPath = el_history_path();
+    if ([[NSFileManager defaultManager] fileExistsAtPath:histPath]) {
+        el_harden_history_path(histPath, 0600, NO);
+    }
+    NSArray *saved = [NSArray arrayWithContentsOfFile:histPath];
+    if ([saved isKindOfClass:[NSArray class]]) {
+        for (id item in saved) {
+            if ([item isKindOfClass:[NSString class]] && [item length] > 0 && [item length] <= 128) {
+                [_recentQueries addObject:item];
+                if ([_recentQueries count] >= 10) break;
+            }
+        }
+    }
 }
 
 - (void)didReceiveMemoryWarning {
@@ -85,6 +91,7 @@ static void el_save_history_array(NSArray *queries) {
     [_searchBarContainer release]; _searchBarContainer = nil;
     [_searchField release]; _searchField = nil;
     [_tableView release]; _tableView = nil;
+    [_historyHeader release]; _historyHeader = nil;
     [_spinner release]; _spinner = nil;
     [_hintLabel release]; _hintLabel = nil;
 }
@@ -143,9 +150,11 @@ static void el_save_history_array(NSArray *queries) {
 
     [self.view addSubview:_searchBarContainer];
 
+    [self loadHistoryIfNeeded];
+
     _tableView = [[ELTrackListHelper createTrackTableViewWithFrame:CGRectMake(0.0f, 54.0f, 320.0f, self.view.bounds.size.height - 54.0f)
                                                           delegate:self
-                                                         rowHeight:0.0f] retain];
+                                                         rowHeight:(_showingHistory ? 44.0f : 62.0f)] retain];
     [self.view addSubview:_tableView];
 
     _spinner = [[ELTrackListHelper createSpinnerAtCenter:CGPointMake(160.0f, 185.0f)] retain];
@@ -171,26 +180,53 @@ static void el_save_history_array(NSArray *queries) {
     [self updateEmptyHint];
 }
 
-- (void)onPlayerStateChanged {
-    if (!_showingHistory) {
-        [_tableView reloadData];
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    if (_needsRefresh) {
+        _needsRefresh = NO;
+        if (!_showingHistory) {
+            [ELTrackListHelper refreshVisibleTrackHighlightInTableView:_tableView];
+#if EL_FEATURE_DOWNLOADS
+            [ELTrackListHelper refreshVisibleTrackCellsInTableView:_tableView forVideoId:nil];
+#endif
+        }
     }
+}
+
+- (void)onPlayerStateChanged {
+    if (_showingHistory) return;
+    if (!self.view.window) {
+        _needsRefresh = YES;
+        return;
+    }
+    [ELTrackListHelper refreshVisibleTrackHighlightInTableView:_tableView];
 }
 
 #if EL_FEATURE_DOWNLOADS
 - (void)onDownloadsChanged {
-    if (!_showingHistory) {
-        [ELTrackListHelper refreshVisibleTrackCellsInTableView:_tableView forVideoId:nil];
+    if (_showingHistory) return;
+    if (!self.view.window) {
+        _needsRefresh = YES;
+        return;
     }
+    [ELTrackListHelper refreshVisibleTrackCellsInTableView:_tableView forVideoId:nil];
 }
 
 - (void)onDownloadProgress:(NSNotification *)note {
-    if (!_showingHistory) {
-        NSString *vid = [[note userInfo] objectForKey:@"videoId"];
-        [ELTrackListHelper refreshVisibleTrackCellsInTableView:_tableView forVideoId:vid];
+    if (_showingHistory) return;
+    if (!self.view.window) {
+        _needsRefresh = YES;
+        return;
     }
+    NSString *vid = [[note userInfo] objectForKey:@"videoId"];
+    [ELTrackListHelper refreshVisibleTrackCellsInTableView:_tableView forVideoId:vid];
 }
 #endif
+
+- (void)setShowingHistory:(BOOL)showing {
+    _showingHistory = showing;
+    _tableView.rowHeight = showing ? 44.0f : 62.0f;
+}
 
 - (void)updateEmptyHint {
     if (_showingHistory) {
@@ -230,7 +266,7 @@ static void el_save_history_array(NSArray *queries) {
     if ([q length] == 0) return;
     [self recordQuery:q];
     NSArray *histSnap = [[_recentQueries copy] autorelease];
-    _showingHistory = NO;
+    [self setShowingHistory:NO];
     _searchToken++;
     _hintLabel.hidden = YES;
     self.navigationItem.rightBarButtonItem = nil;
@@ -261,7 +297,7 @@ static void el_save_history_array(NSArray *queries) {
 
 - (void)onSearchTextChanged {
     if ([_searchField.text length] == 0) {
-        _showingHistory = YES;
+        [self setShowingHistory:YES];
         [self updateEmptyHint];
         [_tableView reloadData];
     }
@@ -269,7 +305,7 @@ static void el_save_history_array(NSArray *queries) {
 
 - (BOOL)textFieldShouldClear:(UITextField *)textField {
     (void)textField;
-    _showingHistory = YES;
+    [self setShowingHistory:YES];
     [self updateEmptyHint];
     [_tableView reloadData];
     return YES;
@@ -337,11 +373,6 @@ static void el_save_history_array(NSArray *queries) {
 
 #pragma mark - UITableViewDataSource
 
-- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
-    (void)tableView; (void)indexPath;
-    return _showingHistory ? 44.0f : 62.0f;
-}
-
 - (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
     (void)tableView; (void)section;
     return (_showingHistory && [_recentQueries count] > 0) ? 26.0f : 0.0f;
@@ -350,7 +381,10 @@ static void el_save_history_array(NSArray *queries) {
 - (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
     (void)tableView; (void)section;
     if (!_showingHistory || [_recentQueries count] == 0) return nil;
-    return [ELTrackListHelper createSectionHeaderWithTitle:@"RECENT SEARCHES" height:26.0f];
+    if (!_historyHeader) {
+        _historyHeader = [[ELTrackListHelper createSectionHeaderWithTitle:@"RECENT SEARCHES" height:26.0f] retain];
+    }
+    return _historyHeader;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {

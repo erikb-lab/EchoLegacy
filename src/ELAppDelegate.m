@@ -2,10 +2,10 @@
 #import "ELAccountVC.h"
 #import "ELAudioEngine.h"
 #import "ELFeatures.h"
+#import "ELHTTPClient.h"
 #import "ELImageCache.h"
 #import "ELNowPlayingVC.h"
 #import "ELTheme.h"
-#import <QuartzCore/QuartzCore.h>
 
 #if EL_FEATURE_HOME_TAB
 #import "ELHomeVC.h"
@@ -92,19 +92,26 @@
 }
 
 - (void)setupToastLabel {
-    /* Floating dark toast pill for Shake-to-Shuffle / Shuffle / Repeat feedback */
-    _toastLabel = [[UILabel alloc] initWithFrame:CGRectMake(40.0f, 32.0f, 240.0f, 30.0f)];
-    _toastLabel.backgroundColor = [UIColor colorWithRed:0.12f green:0.12f blue:0.17f alpha:0.94f];
-    _toastLabel.layer.cornerRadius = 15.0f;
-    _toastLabel.layer.borderColor = [[ELTheme accentColor] CGColor];
-    _toastLabel.layer.borderWidth = 1.0f;
-    _toastLabel.layer.masksToBounds = YES;
+    /* Floating dark toast pill using pre-rendered image (zero offscreen cornerRadius FBO) */
+    CGRect toastFrame = CGRectMake(40.0f, 32.0f, 240.0f, 30.0f);
+    UIColor *toastFill = [UIColor colorWithRed:0.12f green:0.12f blue:0.17f alpha:0.94f];
+    UIImage *pillImg = [ELTheme roundedRectImageWithSize:toastFrame.size
+                                                  radius:15.0f
+                                               fillColor:toastFill
+                                             borderColor:[ELTheme accentColor]];
+    _toastBgView = [[UIImageView alloc] initWithFrame:toastFrame];
+    _toastBgView.image = pillImg;
+    _toastBgView.alpha = 0.0f;
+    _toastBgView.userInteractionEnabled = NO;
+
+    _toastLabel = [[UILabel alloc] initWithFrame:CGRectMake(10.0f, 0.0f, toastFrame.size.width - 20.0f, toastFrame.size.height)];
+    _toastLabel.backgroundColor = [UIColor clearColor];
     _toastLabel.font = [UIFont boldSystemFontOfSize:12.0f];
     _toastLabel.textColor = [UIColor whiteColor];
     _toastLabel.textAlignment = UITextAlignmentCenter;
-    _toastLabel.alpha = 0.0f;
     _toastLabel.userInteractionEnabled = NO;
-    [_window addSubview:_toastLabel];
+    [_toastBgView addSubview:_toastLabel];
+    [_window addSubview:_toastBgView];
 }
 
 - (void)setupPrivacyShieldWithBounds:(CGRect)bounds {
@@ -166,12 +173,12 @@
     if ([msg length] == 0) return;
 
     _toastLabel.text = msg;
-    [_window bringSubviewToFront:_toastLabel];
+    [_window bringSubviewToFront:_toastBgView];
     [self clearToastTimer];
 
     [UIView beginAnimations:@"toastIn" context:NULL];
     [UIView setAnimationDuration:0.18];
-    _toastLabel.alpha = 1.0f;
+    _toastBgView.alpha = 1.0f;
     [UIView commitAnimations];
 
     _toastTimer = [[NSTimer scheduledTimerWithTimeInterval:1.6
@@ -186,7 +193,7 @@
 
     [UIView beginAnimations:@"toastOut" context:NULL];
     [UIView setAnimationDuration:0.25];
-    _toastLabel.alpha = 0.0f;
+    _toastBgView.alpha = 0.0f;
     [UIView commitAnimations];
 }
 
@@ -222,8 +229,10 @@
     [self showPrivacyShield];
     [application beginReceivingRemoteControlEvents];
     [_window becomeFirstResponder];
-    /* RAM optimization: flush decoded album art bitmaps while backgrounded (disk cache stays intact) */
+    /* RAM optimization: flush decoded bitmaps, theme caches, and idle TLS sockets while backgrounded */
     [[ELImageCache sharedCache] clearMemoryCache];
+    [ELTheme flushMemoryCaches];
+    [ELHTTPClient clearKeepAlivePool];
 }
 
 - (void)applicationWillEnterForeground:(UIApplication *)application {
@@ -234,6 +243,8 @@
 - (void)applicationDidReceiveMemoryWarning:(UIApplication *)application {
     (void)application;
     [[ELImageCache sharedCache] clearMemoryCache];
+    [ELTheme flushMemoryCaches];
+    [ELHTTPClient clearKeepAlivePool];
 }
 
 - (void)applicationWillTerminate:(UIApplication *)application {
@@ -246,6 +257,7 @@
     [self clearToastTimer];
     [_privacyShieldView release];
     [_toastLabel release];
+    [_toastBgView release];
     [_miniPlayerBar release];
     [_tabBarController release];
     [_window release];

@@ -30,6 +30,7 @@
     [_moodScroll release]; _moodScroll = nil;
     [_moodButtons removeAllObjects];
     [_tableView release]; _tableView = nil;
+    [_sectionHeader release]; _sectionHeader = nil;
     [_spinner release]; _spinner = nil;
     [_emptyLabel release]; _emptyLabel = nil;
 }
@@ -134,16 +135,39 @@
     [self loadCurrentMood];
 }
 
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    if (_needsRefresh) {
+        _needsRefresh = NO;
+        [ELTrackListHelper refreshVisibleTrackHighlightInTableView:_tableView];
+#if EL_FEATURE_DOWNLOADS
+        [ELTrackListHelper refreshVisibleTrackCellsInTableView:_tableView forVideoId:nil];
+#endif
+    }
+}
+
 - (void)reloadTable {
-    [_tableView reloadData];
+    if (!self.view.window) {
+        _needsRefresh = YES;
+        return;
+    }
+    [ELTrackListHelper refreshVisibleTrackHighlightInTableView:_tableView];
 }
 
 #if EL_FEATURE_DOWNLOADS
 - (void)onDownloadsChanged {
+    if (!self.view.window) {
+        _needsRefresh = YES;
+        return;
+    }
     [ELTrackListHelper refreshVisibleTrackCellsInTableView:_tableView forVideoId:nil];
 }
 
 - (void)onDownloadProgress:(NSNotification *)note {
+    if (!self.view.window) {
+        _needsRefresh = YES;
+        return;
+    }
     NSString *vid = [[note userInfo] objectForKey:@"videoId"];
     [ELTrackListHelper refreshVisibleTrackCellsInTableView:_tableView forVideoId:vid];
 }
@@ -230,29 +254,30 @@
 - (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
     (void)tableView; (void)section;
     if ([_tracks count] == 0) return nil;
-    UIView *v = [[[UIView alloc] initWithFrame:CGRectMake(0.0f, 0.0f, 320.0f, 36.0f)] autorelease];
-    v.backgroundColor = [ELTheme backgroundColor];
-    v.opaque = YES;
+    if (!_sectionHeader) {
+        _sectionHeader = [[UIView alloc] initWithFrame:CGRectMake(0.0f, 0.0f, 320.0f, 36.0f)];
+        _sectionHeader.backgroundColor = [ELTheme backgroundColor];
+        _sectionHeader.opaque = YES;
 
-    UILabel *lbl = [[[UILabel alloc] initWithFrame:CGRectMake(14.0f, 4.0f, 200.0f, 28.0f)] autorelease];
-    lbl.backgroundColor = [ELTheme backgroundColor];
-    lbl.opaque = YES;
-    lbl.font = [UIFont boldSystemFontOfSize:12.0f];
-    lbl.textColor = [ELTheme textSecondaryColor];
-    lbl.text = @"QUICK PICKS";
-    [v addSubview:lbl];
+        UILabel *lbl = [[[UILabel alloc] initWithFrame:CGRectMake(14.0f, 4.0f, 200.0f, 28.0f)] autorelease];
+        lbl.backgroundColor = [ELTheme backgroundColor];
+        lbl.opaque = YES;
+        lbl.font = [UIFont boldSystemFontOfSize:12.0f];
+        lbl.textColor = [ELTheme textSecondaryColor];
+        lbl.text = @"QUICK PICKS";
+        [_sectionHeader addSubview:lbl];
 
-    UIButton *playAllBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    playAllBtn.frame = CGRectMake(240.0f, 5.0f, 68.0f, 26.0f);
-    [playAllBtn setBackgroundImage:[ELTheme stretchablePillImageWithHeight:26.0f color:[ELTheme surfaceColor]] forState:UIControlStateNormal];
-    [playAllBtn setBackgroundImage:[ELTheme stretchablePillImageWithHeight:26.0f color:[ELTheme surfaceHighlightColor]] forState:UIControlStateHighlighted];
-    playAllBtn.titleLabel.font = [UIFont boldSystemFontOfSize:11.0f];
-    [playAllBtn setTitle:@"Play all" forState:UIControlStateNormal];
-    [playAllBtn setTitleColor:[ELTheme textPrimaryColor] forState:UIControlStateNormal];
-    [playAllBtn addTarget:self action:@selector(onPlayAllTapped) forControlEvents:UIControlEventTouchUpInside];
-    [v addSubview:playAllBtn];
-
-    return v;
+        UIButton *playAllBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+        playAllBtn.frame = CGRectMake(240.0f, 5.0f, 68.0f, 26.0f);
+        [playAllBtn setBackgroundImage:[ELTheme stretchablePillImageWithHeight:26.0f color:[ELTheme surfaceColor]] forState:UIControlStateNormal];
+        [playAllBtn setBackgroundImage:[ELTheme stretchablePillImageWithHeight:26.0f color:[ELTheme surfaceHighlightColor]] forState:UIControlStateHighlighted];
+        playAllBtn.titleLabel.font = [UIFont boldSystemFontOfSize:11.0f];
+        [playAllBtn setTitle:@"Play all" forState:UIControlStateNormal];
+        [playAllBtn setTitleColor:[ELTheme textPrimaryColor] forState:UIControlStateNormal];
+        [playAllBtn addTarget:self action:@selector(onPlayAllTapped) forControlEvents:UIControlEventTouchUpInside];
+        [_sectionHeader addSubview:playAllBtn];
+    }
+    return _sectionHeader;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {

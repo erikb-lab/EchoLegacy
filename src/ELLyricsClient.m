@@ -101,14 +101,36 @@ static NSInteger el_compare_lyric_lines(id a, id b, void *ctx) {
     return NSOrderedSame;
 }
 
+static NSCharacterSet *el_cr_charset(void) {
+    static NSCharacterSet *cs = nil;
+    if (!cs) {
+        @synchronized([ELLyricsClient class]) {
+            if (!cs) cs = [[NSCharacterSet characterSetWithCharactersInString:@"\r"] retain];
+        }
+    }
+    return cs;
+}
+
+static NSCharacterSet *el_plain_trim_charset(void) {
+    static NSCharacterSet *cs = nil;
+    if (!cs) {
+        @synchronized([ELLyricsClient class]) {
+            if (!cs) cs = [[NSCharacterSet characterSetWithCharactersInString:@"\r \t"] retain];
+        }
+    }
+    return cs;
+}
+
 static NSArray *el_parse_lrc_string(NSString *lrc) {
     if ([lrc length] == 0 || [lrc length] > EL_MAX_LYRICS_BYTES) return [NSArray array];
     NSMutableArray *lines = [NSMutableArray array];
     NSArray *rawLines = [lrc componentsSeparatedByString:@"\n"];
+    NSCharacterSet *crSet = el_cr_charset();
+    NSCharacterSet *wsSet = [NSCharacterSet whitespaceCharacterSet];
 
     for (NSString *raw in rawLines) {
         if ([lines count] >= EL_MAX_LYRICS_LINES) break;
-        NSString *line = [raw stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"\r"]];
+        NSString *line = [raw stringByTrimmingCharactersInSet:crSet];
         if ([line length] == 0) continue;
 
         /* Extract one or more leading [mm:ss.xx] tags */
@@ -132,7 +154,7 @@ static NSArray *el_parse_lrc_string(NSString *lrc) {
         if ([times count] == 0) continue;
 
         NSString *text = [[line substringFromIndex:pos]
-                          stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                          stringByTrimmingCharactersInSet:wsSet];
         if ([text length] == 0) text = @" ";
 
         for (NSNumber *num in times) {
@@ -152,9 +174,10 @@ static NSArray *el_parse_plain_lyrics(NSString *plain) {
     if ([plain length] == 0 || [plain length] > EL_MAX_LYRICS_BYTES) return [NSArray array];
     NSMutableArray *lines = [NSMutableArray array];
     NSArray *rawLines = [plain componentsSeparatedByString:@"\n"];
+    NSCharacterSet *trimSet = el_plain_trim_charset();
     for (NSString *raw in rawLines) {
         if ([lines count] >= EL_MAX_LYRICS_LINES) break;
-        NSString *text = [raw stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"\r \t"]];
+        NSString *text = [raw stringByTrimmingCharactersInSet:trimSet];
         if ([text length] == 0) continue;
         ELLyricLine *item = [[[ELLyricLine alloc] init] autorelease];
         item.timeSeconds = -1.0;

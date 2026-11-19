@@ -1,13 +1,18 @@
 #import "ELTheme.h"
 #include <math.h>
+#include <pthread.h>
 #include <string.h>
 
 #define EL_MAX_ROUNDED_THUMBS 128
 
+static pthread_mutex_t g_icon_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_thumb_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_backdrop_lock = PTHREAD_MUTEX_INITIALIZER;
+
 static NSMutableDictionary *g_icon_cache = nil;
 static NSMutableDictionary *g_thumb_cache = nil;
 static NSMutableArray *g_thumb_lru = nil;
-static BOOL g_thumb_observer_registered = NO;
+static NSMutableDictionary *g_backdrop_cache = nil;
 
 static CGFloat el_clampf(CGFloat v, CGFloat lo, CGFloat hi) {
     if (v < lo) return lo;
@@ -66,19 +71,20 @@ static NSString *el_icon_key(NSString *name, CGFloat size, UIColor *color) {
 }
 
 static UIImage *el_cached_icon(NSString *key) {
-    @synchronized([ELTheme class]) {
-        if (!g_icon_cache) g_icon_cache = [[NSMutableDictionary alloc] init];
-        UIImage *img = [g_icon_cache objectForKey:key];
-        return img ? [[img retain] autorelease] : nil;
-    }
+    if (!key) return nil;
+    pthread_mutex_lock(&g_icon_lock);
+    UIImage *img = [g_icon_cache objectForKey:key];
+    if (img) [[img retain] autorelease];
+    pthread_mutex_unlock(&g_icon_lock);
+    return img;
 }
 
 static UIImage *el_store_icon(NSString *key, UIImage *img) {
-    @synchronized([ELTheme class]) {
-        if (!g_icon_cache) g_icon_cache = [[NSMutableDictionary alloc] init];
-        if (img && key) [g_icon_cache setObject:img forKey:key];
-        return img;
-    }
+    if (!img || !key) return img;
+    pthread_mutex_lock(&g_icon_lock);
+    if (g_icon_cache) [g_icon_cache setObject:img forKey:key];
+    pthread_mutex_unlock(&g_icon_lock);
+    return img;
 }
 
 /* Returns a cached icon on hit, or opens an image context and returns nil on miss (pair with el_end_icon). */
@@ -150,16 +156,13 @@ static void el_add_heart_path(CGContextRef ctx, CGFloat size) {
     CGContextClosePath(ctx);
 }
 
-static CGContextRef el_create_argb_bitmap_context(size_t px) {
+static CGContextRef el_create_bitmap_context(size_t w, size_t h, BOOL opaque) {
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
     if (!cs) return NULL;
-    CGContextRef ctx = CGBitmapContextCreate(NULL,
-                                             px,
-                                             px,
-                                             8,
-                                             px * 4,
-                                             cs,
-                                             kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Host);
+    CGBitmapInfo info = opaque
+        ? (kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little)
+        : (kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+    CGContextRef ctx = CGBitmapContextCreate(NULL, w, h, 8, w * 4, cs, info);
     CGColorSpaceRelease(cs);
     return ctx;
 }
@@ -180,20 +183,31 @@ static size_t el_clamp_thumb_px(CGFloat size) {
     return px;
 }
 
-static UIImage *el_render_rounded_cgimage(CGImageRef cgImg, size_t px, CGFloat radius, CGRect drawRect) {
-    CGContextRef ctx = el_create_argb_bitmap_context(px);
+static UIImage *el_render_rounded_cgimage(CGImageRef cgImg, size_t px, CGFloat radius, CGRect drawRect, UIColor *matteColor) {
+    BOOL opaque = (matteColor != nil);
+    CGContextRef ctx = el_create_bitmap_context(px, px, opaque);
     if (!ctx) return nil;
     CGFloat fSize = (CGFloat)px;
-    CGContextClearRect(ctx, CGRectMake(0.0f, 0.0f, fSize, fSize));
-    el_add_rounded_rect_path(ctx, CGRectMake(0.0f, 0.0f, fSize, fSize), radius);
+    CGRect bounds = CGRectMake(0.0f, 0.0f, fSize, fSize);
+    if (opaque) {
+        CGContextSetFillColorWithColor(ctx, [matteColor CGColor]);
+        CGContextFillRect(ctx, bounds);
+    } else {
+        CGContextClearRect(ctx, bounds);
+    }
+    el_add_rounded_rect_path(ctx, bounds, radius);
     CGContextClip(ctx);
     CGContextSetInterpolationQuality(ctx, kCGInterpolationMedium);
     CGContextDrawImage(ctx, drawRect, cgImg);
     return el_finish_bitmap_context(ctx);
 }
 
-static NSString *el_thumb_key(CGFloat size, CGFloat radius, NSString *cacheKey) {
-    return [NSString stringWithFormat:@"%d_%d_%@", (int)(size + 0.5f), (int)(radius + 0.5f), cacheKey];
+static NSString *el_thumb_key(CGFloat size, CGFloat radius, UIColor *matteColor, NSString *cacheKey) {
+    return [NSString stringWithFormat:@"%d_%d_%@_%@",
+            (int)(size + 0.5f),
+            (int)(radius + 0.5f),
+            matteColor ? el_color_hex(matteColor) : @"clear",
+            cacheKey];
 }
 
 static float el_max3f(float a, float b, float c) {
@@ -265,6 +279,23 @@ static UIColor *el_backdrop_color_from_rgb(float r, float g, float b) {
 
 @implementation ELTheme
 
++ (void)initialize {
+    if (self == [ELTheme class]) {
+        g_icon_cache = [[NSMutableDictionary alloc] initWithCapacity:64];
+        g_thumb_cache = [[NSMutableDictionary alloc] initWithCapacity:EL_MAX_ROUNDED_THUMBS];
+        g_thumb_lru = [[NSMutableArray alloc] initWithCapacity:EL_MAX_ROUNDED_THUMBS];
+        g_backdrop_cache = [[NSMutableDictionary alloc] initWithCapacity:32];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(flushMemoryCaches)
+                                                     name:UIApplicationDidReceiveMemoryWarningNotification
+                                                   object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(clearThumbnailCache)
+                                                     name:UIApplicationDidEnterBackgroundNotification
+                                                   object:nil];
+    }
+}
+
 + (UIColor *)backgroundColor {
     static UIColor *c = nil;
     return el_static_color(&c, 0.051f, 0.051f, 0.071f, 1.0f);
@@ -311,22 +342,20 @@ static UIColor *el_backdrop_color_from_rgb(float r, float g, float b) {
 }
 
 + (UIColor *)dominantBackdropColorFromImage:(UIImage *)image cacheKey:(NSString *)cacheKey {
-    static NSMutableDictionary *g_backdrop_cache = nil;
     BOOL hasKey = ([cacheKey length] > 0);
     if (hasKey) {
-        @synchronized(self) {
-            if (!g_backdrop_cache) g_backdrop_cache = [[NSMutableDictionary alloc] init];
-            UIColor *hit = [g_backdrop_cache objectForKey:cacheKey];
-            if (hit) return [[hit retain] autorelease];
-        }
+        pthread_mutex_lock(&g_backdrop_lock);
+        UIColor *hit = [g_backdrop_cache objectForKey:cacheKey];
+        if (hit) [[hit retain] autorelease];
+        pthread_mutex_unlock(&g_backdrop_lock);
+        if (hit) return hit;
     }
     UIColor *col = [self dominantBackdropColorFromImage:image];
     if (col && hasKey && image && image != [self placeholderArtImage]) {
-        @synchronized(self) {
-            if (!g_backdrop_cache) g_backdrop_cache = [[NSMutableDictionary alloc] init];
-            if ([g_backdrop_cache count] > 32) [g_backdrop_cache removeAllObjects];
-            [g_backdrop_cache setObject:col forKey:cacheKey];
-        }
+        pthread_mutex_lock(&g_backdrop_lock);
+        if ([g_backdrop_cache count] > 32) [g_backdrop_cache removeAllObjects];
+        [g_backdrop_cache setObject:col forKey:cacheKey];
+        pthread_mutex_unlock(&g_backdrop_lock);
     }
     return col;
 }
@@ -441,9 +470,8 @@ static UIColor *el_backdrop_color_from_rgb(float r, float g, float b) {
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
     btn.frame = frame;
     btn.backgroundColor = [UIColor clearColor];
-    CGFloat r = frame.size.height * 0.5f;
-    UIImage *bgNorm = [self roundedRectImageWithSize:frame.size radius:r fillColor:color borderColor:nil];
-    UIImage *bgHi = [self roundedRectImageWithSize:frame.size radius:r fillColor:[self darkerShadeOfColor:color factor:0.78f] borderColor:nil];
+    UIImage *bgNorm = [self stretchablePillImageWithHeight:frame.size.height color:color];
+    UIImage *bgHi = [self stretchablePillImageWithHeight:frame.size.height color:[self darkerShadeOfColor:color factor:0.78f]];
     [btn setBackgroundImage:bgNorm forState:UIControlStateNormal];
     [btn setBackgroundImage:bgHi forState:UIControlStateHighlighted];
     btn.titleLabel.font = [UIFont boldSystemFontOfSize:13.0f];
@@ -869,16 +897,22 @@ static UIColor *el_backdrop_color_from_rgb(float r, float g, float b) {
 }
 
 + (UIImage *)stretchableCardImageWithColor:(UIColor *)color {
-    NSString *k = el_icon_key(@"scard", 10.0f, color);
-    CGFloat dim = 24.0f;
-    CGContextRef ctx = NULL;
-    UIImage *c = el_begin_icon(k, CGSizeMake(dim, dim), &ctx);
-    if (c) return c;
-    [color setFill];
-    el_add_rounded_rect_path(ctx, CGRectMake(0.0f, 0.0f, dim, dim), 10.0f);
+    NSString *k = el_icon_key(@"scard_bg", 10.0f, color);
+    UIImage *cached = el_cached_icon(k);
+    if (cached) return cached;
+
+    const size_t dim = 24;
+    CGContextRef ctx = el_create_bitmap_context(dim, dim, YES);
+    if (!ctx) return nil;
+    CGRect bounds = CGRectMake(0.0f, 0.0f, (CGFloat)dim, (CGFloat)dim);
+    CGContextSetFillColorWithColor(ctx, [[self backgroundColor] CGColor]);
+    CGContextFillRect(ctx, bounds);
+    CGContextSetFillColorWithColor(ctx, [color CGColor]);
+    el_add_rounded_rect_path(ctx, bounds, 10.0f);
     CGContextFillPath(ctx);
-    UIImage *img = [UIGraphicsGetImageFromCurrentImageContext() stretchableImageWithLeftCapWidth:11 topCapHeight:11];
-    UIGraphicsEndImageContext();
+
+    UIImage *raw = el_finish_bitmap_context(ctx);
+    UIImage *img = raw ? [raw stretchableImageWithLeftCapWidth:11 topCapHeight:11] : nil;
     return el_store_icon(k, img);
 }
 
@@ -949,35 +983,108 @@ static UIColor *el_backdrop_color_from_rgb(float r, float g, float b) {
     return el_end_icon(k);
 }
 
-+ (void)clearThumbnailCache {
-    @synchronized(self) {
-        [g_thumb_cache removeAllObjects];
-        [g_thumb_lru removeAllObjects];
++ (UIImage *)verticalGradientImageWithHeight:(CGFloat)h
+                                    topColor:(UIColor *)top
+                                    midColor:(UIColor *)mid
+                                 midLocation:(CGFloat)midLoc
+                                 bottomColor:(UIColor *)bottom
+                                      opaque:(BOOL)opaque {
+    size_t pxH = (size_t)(h + 0.5f);
+    if (pxH == 0) pxH = 1;
+    if (pxH > 1024) pxH = 1024;
+
+    int midPct = (int)(el_clampf(midLoc, 0.0f, 1.0f) * 100.0f + 0.5f);
+    NSString *k = [NSString stringWithFormat:@"vgrad_%u_%d_%@_%@_%d_%@",
+                   (unsigned)pxH,
+                   opaque ? 1 : 0,
+                   el_color_hex(top),
+                   mid ? el_color_hex(mid) : @"none",
+                   midPct,
+                   el_color_hex(bottom)];
+    UIImage *cached = el_cached_icon(k);
+    if (cached) return cached;
+
+    CGContextRef ctx = el_create_bitmap_context(1, pxH, opaque);
+    if (!ctx) return nil;
+
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    if (!cs) {
+        CGContextRelease(ctx);
+        return nil;
     }
+
+    CGFloat r0, g0, b0, a0;
+    CGFloat r2, g2, b2, a2;
+    el_color_rgba(top, &r0, &g0, &b0, &a0);
+    el_color_rgba(bottom, &r2, &g2, &b2, &a2);
+
+    CGGradientRef grad = NULL;
+    if (mid) {
+        CGFloat r1, g1, b1, a1;
+        el_color_rgba(mid, &r1, &g1, &b1, &a1);
+        CGFloat comps[12] = { r0, g0, b0, a0, r1, g1, b1, a1, r2, g2, b2, a2 };
+        CGFloat locs[3] = { 0.0f, el_clampf(midLoc, 0.0f, 1.0f), 1.0f };
+        grad = CGGradientCreateWithColorComponents(cs, comps, locs, 3);
+    } else {
+        CGFloat comps[8] = { r0, g0, b0, a0, r2, g2, b2, a2 };
+        CGFloat locs[2] = { 0.0f, 1.0f };
+        grad = CGGradientCreateWithColorComponents(cs, comps, locs, 2);
+    }
+    CGColorSpaceRelease(cs);
+
+    if (grad) {
+        /* CGBitmapContext origin is bottom-left: y = pxH is top, y = 0 is bottom */
+        CGContextDrawLinearGradient(ctx,
+                                    grad,
+                                    CGPointMake(0.0f, (CGFloat)pxH),
+                                    CGPointMake(0.0f, 0.0f),
+                                    0);
+        CGGradientRelease(grad);
+    }
+    UIImage *img = el_finish_bitmap_context(ctx);
+    return el_store_icon(k, img);
 }
 
-+ (void)ensureThumbCacheReady {
-    @synchronized(self) {
-        if (!g_thumb_cache) g_thumb_cache = [[NSMutableDictionary alloc] initWithCapacity:EL_MAX_ROUNDED_THUMBS];
-        if (!g_thumb_lru) g_thumb_lru = [[NSMutableArray alloc] initWithCapacity:EL_MAX_ROUNDED_THUMBS];
-        if (!g_thumb_observer_registered) {
-            g_thumb_observer_registered = YES;
-            [[NSNotificationCenter defaultCenter] addObserver:self
-                                                     selector:@selector(clearThumbnailCache)
-                                                         name:UIApplicationDidReceiveMemoryWarningNotification
-                                                       object:nil];
-            [[NSNotificationCenter defaultCenter] addObserver:self
-                                                     selector:@selector(clearThumbnailCache)
-                                                         name:UIApplicationDidEnterBackgroundNotification
-                                                       object:nil];
++ (void)clearThumbnailCache {
+    pthread_mutex_lock(&g_thumb_lock);
+    [g_thumb_cache removeAllObjects];
+    [g_thumb_lru removeAllObjects];
+    pthread_mutex_unlock(&g_thumb_lock);
+}
+
++ (void)flushMemoryCaches {
+    [self clearThumbnailCache];
+
+    pthread_mutex_lock(&g_backdrop_lock);
+    [g_backdrop_cache removeAllObjects];
+    pthread_mutex_unlock(&g_backdrop_lock);
+
+    pthread_mutex_lock(&g_icon_lock);
+    if ([g_icon_cache count] > 0) {
+        NSMutableArray *evictKeys = [NSMutableArray array];
+        for (NSString *k in g_icon_cache) {
+            if ([k hasPrefix:@"vgrad_"] || [k hasPrefix:@"rrect_"]) {
+                [evictKeys addObject:k];
+            }
+        }
+        if ([evictKeys count] > 0) {
+            [g_icon_cache removeObjectsForKeys:evictKeys];
         }
     }
+    pthread_mutex_unlock(&g_icon_lock);
 }
 
 + (UIImage *)roundedPlaceholderArtSize:(CGFloat)size radius:(CGFloat)radius {
+    return [self roundedPlaceholderArtSize:size radius:radius matteColor:[self surfaceColor]];
+}
+
++ (UIImage *)roundedPlaceholderArtSize:(CGFloat)size radius:(CGFloat)radius matteColor:(UIColor *)matteColor {
     if (size <= 0.0f) size = 44.0f;
     if (size > 512.0f) size = 512.0f;
-    NSString *k = [NSString stringWithFormat:@"rph_%d_%d", (int)(size + 0.5f), (int)(radius + 0.5f)];
+    NSString *k = [NSString stringWithFormat:@"rph_%d_%d_%@",
+                   (int)(size + 0.5f),
+                   (int)(radius + 0.5f),
+                   matteColor ? el_color_hex(matteColor) : @"clear"];
     UIImage *c = el_cached_icon(k);
     if (c) return c;
 
@@ -987,43 +1094,50 @@ static UIColor *el_backdrop_color_from_rgb(float r, float g, float b) {
 
     size_t px = el_clamp_thumb_px(size);
     CGFloat fSize = (CGFloat)px;
-    UIImage *img = el_render_rounded_cgimage(cgImg, px, radius, CGRectMake(0.0f, 0.0f, fSize, fSize));
+    UIImage *img = el_render_rounded_cgimage(cgImg, px, radius, CGRectMake(0.0f, 0.0f, fSize, fSize), matteColor);
     return el_store_icon(k, img ? img : base);
 }
 
 + (UIImage *)cachedRoundedThumbnailForSize:(CGFloat)size radius:(CGFloat)radius cacheKey:(NSString *)cacheKey {
+    return [self cachedRoundedThumbnailForSize:size radius:radius matteColor:[self surfaceColor] cacheKey:cacheKey];
+}
+
++ (UIImage *)cachedRoundedThumbnailForSize:(CGFloat)size radius:(CGFloat)radius matteColor:(UIColor *)matteColor cacheKey:(NSString *)cacheKey {
     if ([cacheKey length] == 0 || size <= 0.0f) {
         return nil;
     }
-    [self ensureThumbCacheReady];
-    NSString *fullKey = el_thumb_key(size, radius, cacheKey);
-    @synchronized(self) {
-        UIImage *hit = [g_thumb_cache objectForKey:fullKey];
-        if (hit) {
-            [[hit retain] autorelease];
-            [g_thumb_lru removeObject:fullKey];
-            [g_thumb_lru addObject:fullKey];
-            return hit;
-        }
+    NSString *fullKey = el_thumb_key(size, radius, matteColor, cacheKey);
+    UIImage *hit = nil;
+    pthread_mutex_lock(&g_thumb_lock);
+    hit = [g_thumb_cache objectForKey:fullKey];
+    if (hit) {
+        [[hit retain] autorelease];
+        [g_thumb_lru removeObject:fullKey];
+        [g_thumb_lru addObject:fullKey];
     }
-    return nil;
+    pthread_mutex_unlock(&g_thumb_lock);
+    return hit;
 }
 
 + (UIImage *)roundedThumbnailFromImage:(UIImage *)image size:(CGFloat)size radius:(CGFloat)radius cacheKey:(NSString *)cacheKey {
+    return [self roundedThumbnailFromImage:image size:size radius:radius matteColor:[self surfaceColor] cacheKey:cacheKey];
+}
+
++ (UIImage *)roundedThumbnailFromImage:(UIImage *)image size:(CGFloat)size radius:(CGFloat)radius matteColor:(UIColor *)matteColor cacheKey:(NSString *)cacheKey {
     if (!image || size <= 0.0f) {
-        return [self roundedPlaceholderArtSize:size radius:radius];
+        return [self roundedPlaceholderArtSize:size radius:radius matteColor:matteColor];
     }
     CGImageRef cgImg = [image CGImage];
     if (!cgImg) {
-        return [self roundedPlaceholderArtSize:size radius:radius];
+        return [self roundedPlaceholderArtSize:size radius:radius matteColor:matteColor];
     }
     CGFloat srcW = (CGFloat)CGImageGetWidth(cgImg);
     CGFloat srcH = (CGFloat)CGImageGetHeight(cgImg);
     if (srcW <= 0.0f || srcH <= 0.0f) {
-        return [self roundedPlaceholderArtSize:size radius:radius];
+        return [self roundedPlaceholderArtSize:size radius:radius matteColor:matteColor];
     }
 
-    UIImage *cachedHit = [self cachedRoundedThumbnailForSize:size radius:radius cacheKey:cacheKey];
+    UIImage *cachedHit = [self cachedRoundedThumbnailForSize:size radius:radius matteColor:matteColor cacheKey:cacheKey];
     if (cachedHit) {
         return cachedHit;
     }
@@ -1039,21 +1153,21 @@ static UIColor *el_backdrop_color_from_rgb(float r, float g, float b) {
     CGFloat drawH = srcH * scale;
     CGRect drawRect = CGRectMake((fSize - drawW) * 0.5f, (fSize - drawH) * 0.5f, drawW, drawH);
 
-    UIImage *out = el_render_rounded_cgimage(cgImg, px, radius, drawRect);
+    UIImage *out = el_render_rounded_cgimage(cgImg, px, radius, drawRect, matteColor);
     if (out && [cacheKey length] > 0) {
-        NSString *fullKey = el_thumb_key(size, radius, cacheKey);
-        @synchronized(self) {
-            [g_thumb_cache setObject:out forKey:fullKey];
-            [g_thumb_lru removeObject:fullKey];
-            [g_thumb_lru addObject:fullKey];
-            while ([g_thumb_lru count] > EL_MAX_ROUNDED_THUMBS) {
-                NSString *evict = [g_thumb_lru objectAtIndex:0];
-                [g_thumb_cache removeObjectForKey:evict];
-                [g_thumb_lru removeObjectAtIndex:0];
-            }
+        NSString *fullKey = el_thumb_key(size, radius, matteColor, cacheKey);
+        pthread_mutex_lock(&g_thumb_lock);
+        [g_thumb_cache setObject:out forKey:fullKey];
+        [g_thumb_lru removeObject:fullKey];
+        [g_thumb_lru addObject:fullKey];
+        while ([g_thumb_lru count] > EL_MAX_ROUNDED_THUMBS) {
+            NSString *evict = [g_thumb_lru objectAtIndex:0];
+            [g_thumb_cache removeObjectForKey:evict];
+            [g_thumb_lru removeObjectAtIndex:0];
         }
+        pthread_mutex_unlock(&g_thumb_lock);
     }
-    return out ? out : [self roundedPlaceholderArtSize:size radius:radius];
+    return out ? out : [self roundedPlaceholderArtSize:size radius:radius matteColor:matteColor];
 }
 
 @end

@@ -116,6 +116,7 @@ static NSString *el_local_playlists_dir(void) {
     if (self) {
         _playlists = [[NSMutableArray alloc] init];
         _storePath = [[el_local_playlists_dir() stringByAppendingPathComponent:@"local_playlists.plist"] retain];
+        _saveCond = [[NSCondition alloc] init];
         [self loadFromDisk];
     }
     return self;
@@ -124,6 +125,8 @@ static NSString *el_local_playlists_dir(void) {
 - (void)dealloc {
     [_playlists release];
     [_storePath release];
+    [_saveCond release];
+    [_pendingSaveSnapshot release];
     [super dealloc];
 }
 
@@ -162,7 +165,7 @@ static NSString *el_local_playlists_dir(void) {
     }
 }
 
-- (void)saveSnapshotsToDisk:(NSArray *)serialized {
+- (void)writeSnapshotToDisk:(NSArray *)serialized {
     NSString *errDesc = nil;
     NSData *binData = [NSPropertyListSerialization dataFromPropertyList:serialized
                                                                  format:NSPropertyListBinaryFormat_v1_0
@@ -174,6 +177,41 @@ static NSString *el_local_playlists_dir(void) {
         const char *fsPath = [_storePath fileSystemRepresentation];
         if (fsPath) chmod(fsPath, 0600);
     }
+}
+
+- (void)saveThreadMain:(id)unused {
+    (void)unused;
+    [NSThread setThreadPriority:0.25];
+    for (;;) {
+        NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+        NSArray *snapshot = nil;
+        [_saveCond lock];
+        while (!_pendingSaveSnapshot) {
+            [_saveCond wait];
+        }
+        snapshot = _pendingSaveSnapshot;
+        _pendingSaveSnapshot = nil;
+        [_saveCond unlock];
+
+        if (snapshot) {
+            [self writeSnapshotToDisk:snapshot];
+            [snapshot release];
+        }
+        [pool drain];
+    }
+}
+
+- (void)saveSnapshotsToDisk:(NSArray *)serialized {
+    if (!serialized) return;
+    [_saveCond lock];
+    [_pendingSaveSnapshot release];
+    _pendingSaveSnapshot = [serialized retain];
+    if (!_saveThreadStarted) {
+        _saveThreadStarted = YES;
+        [NSThread detachNewThreadSelector:@selector(saveThreadMain:) toTarget:self withObject:nil];
+    }
+    [_saveCond signal];
+    [_saveCond unlock];
 }
 
 - (NSArray *)serializedSnapshotLocked {

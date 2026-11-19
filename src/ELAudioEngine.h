@@ -49,6 +49,7 @@ typedef enum {
 
     NSTimer *_progressTimer;
     BOOL _isBackgrounded;
+    BOOL _audioSessionActive;
     UIBackgroundTaskIdentifier _bgTask;
     BOOL _resumeAfterInterruption;
 
@@ -62,6 +63,7 @@ typedef enum {
     NSTimeInterval _preNextReadyTime;
     NSInteger _preNextAttemptedSessionToken;
     NSString *_preNextAttemptedVideoId;
+    NSInteger _preNextDoneToken;
 
     /* Sleep timer */
     NSTimer *_sleepTimer;

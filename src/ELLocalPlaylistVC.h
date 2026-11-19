@@ -8,9 +8,12 @@
     NSArray *_tracks;
     UITableView *_tableView;
     UILabel *_emptyLabel;
+    UIView *_playlistHeader;
+    UILabel *_playlistInfoLabel;
     UIView *_renameBar;
     UITextField *_renameField;
     BOOL _showingRenameBar;
+    BOOL _needsRefresh;
 }
 
 - (id)initWithPlaylistId:(NSString *)playlistId;

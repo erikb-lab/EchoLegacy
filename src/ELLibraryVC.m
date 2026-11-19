@@ -41,6 +41,8 @@
     [_emptyFooter release]; _emptyFooter = nil;
     [_emptyLabel release]; _emptyLabel = nil;
     [_emptyActionBtn release]; _emptyActionBtn = nil;
+    [_playlistsHeader release]; _playlistsHeader = nil;
+    [_likedHeader release]; _likedHeader = nil;
     [_filterButtons removeAllObjects];
 }
 
@@ -89,7 +91,8 @@
     if (outIconView) *outIconView = [iv retain];
 
     UILabel *tLbl = [[[UILabel alloc] initWithFrame:CGRectMake(42.0f, 10.0f, frame.size.width - 50.0f, 18.0f)] autorelease];
-    tLbl.backgroundColor = [UIColor clearColor];
+    tLbl.backgroundColor = [ELTheme surfaceColor];
+    tLbl.opaque = YES;
     tLbl.font = [UIFont boldSystemFontOfSize:14.0f];
     tLbl.textColor = [ELTheme textPrimaryColor];
     tLbl.lineBreakMode = UILineBreakModeTailTruncation;
@@ -99,7 +102,8 @@
     if (outTitle) *outTitle = [tLbl retain];
 
     UILabel *sLbl = [[[UILabel alloc] initWithFrame:CGRectMake(42.0f, 29.0f, frame.size.width - 50.0f, 16.0f)] autorelease];
-    sLbl.backgroundColor = [UIColor clearColor];
+    sLbl.backgroundColor = [ELTheme surfaceColor];
+    sLbl.opaque = YES;
     sLbl.font = [UIFont systemFontOfSize:11.0f];
     sLbl.textColor = [ELTheme textSecondaryColor];
     sLbl.lineBreakMode = UILineBreakModeTailTruncation;
@@ -249,8 +253,8 @@
     [self buildEmptyFooter];
     _tableView.tableHeaderView = _quickTilesHeader;
 
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refreshFromCache) name:ELLibraryUpdatedNotification object:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refreshFromCache) name:ELAuthStateChangedNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onLibraryOrAuthChanged) name:ELLibraryUpdatedNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onLibraryOrAuthChanged) name:ELAuthStateChangedNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reloadTable) name:ELPlayerStateChangedNotification object:nil];
 #if EL_FEATURE_DOWNLOADS
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onDownloadsChanged) name:ELDownloadsChangedNotification object:nil];
@@ -260,22 +264,62 @@
     [self refreshFromCache];
 }
 
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    if (_needsRefresh) {
+        _needsRefresh = NO;
+        [self refreshFromCache];
+    }
+}
+
+- (void)onLibraryOrAuthChanged {
+    if (!self.view.window) {
+        _needsRefresh = YES;
+        return;
+    }
+    [self refreshFromCache];
+}
+
 - (void)reloadTable {
-    [_tableView reloadData];
+    if (!self.view.window) {
+        _needsRefresh = YES;
+        return;
+    }
+    [ELTrackListHelper refreshVisibleTrackHighlightInTableView:_tableView];
 }
 
 - (void)onPlaylistArtLoaded:(NSDictionary *)info {
-    (void)info;
-    [_tableView reloadData];
+    UIImage *img = [info objectForKey:@"image"];
+    NSString *url = [info objectForKey:@"url"];
+    if (!img || [url length] == 0) return;
+    NSArray *visiblePaths = [_tableView indexPathsForVisibleRows];
+    for (NSIndexPath *ip in visiblePaths) {
+        if (ip.section != 0 || (NSUInteger)ip.row >= [_playlists count]) continue;
+        ELPlaylist *pl = [_playlists objectAtIndex:(NSUInteger)ip.row];
+        if ([pl.thumbURL isEqualToString:url]) {
+            UITableViewCell *cell = [_tableView cellForRowAtIndexPath:ip];
+            if (cell) {
+                cell.imageView.image = img;
+            }
+        }
+    }
 }
 
 #if EL_FEATURE_DOWNLOADS
 - (void)onDownloadProgress:(NSNotification *)note {
+    if (!self.view.window) {
+        _needsRefresh = YES;
+        return;
+    }
     NSString *vid = [[note userInfo] objectForKey:@"videoId"];
     [ELTrackListHelper refreshVisibleTrackCellsInTableView:_tableView forVideoId:vid];
 }
 
 - (void)onDownloadsChanged {
+    if (!self.view.window) {
+        _needsRefresh = YES;
+        return;
+    }
     [self updateQuickTiles];
     [ELTrackListHelper refreshVisibleTrackCellsInTableView:_tableView forVideoId:nil];
 }
@@ -462,17 +506,25 @@
 
 - (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
     (void)tableView;
-    return [ELTrackListHelper createSectionHeaderWithTitle:(section == 0 ? @"PLAYLISTS" : @"LIKED SONGS")
-                                                    height:28.0f];
+    if (section == 0) {
+        if (!_playlistsHeader) {
+            _playlistsHeader = [[ELTrackListHelper createSectionHeaderWithTitle:@"PLAYLISTS" height:28.0f] retain];
+        }
+        return _playlistsHeader;
+    }
+    if (!_likedHeader) {
+        _likedHeader = [[ELTrackListHelper createSectionHeaderWithTitle:@"LIKED SONGS" height:28.0f] retain];
+    }
+    return _likedHeader;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == 0) {
         static NSString *pid = @"ELPlaylistCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:pid];
+        UIColor *bg = [ELTheme backgroundColor];
         if (!cell) {
             cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:pid] autorelease];
-            UIColor *bg = [ELTheme backgroundColor];
             cell.backgroundColor = bg;
             cell.opaque = YES;
             cell.contentView.backgroundColor = bg;
@@ -489,19 +541,29 @@
             cell.detailTextLabel.opaque = YES;
             cell.detailTextLabel.textColor = [ELTheme textSecondaryColor];
             cell.detailTextLabel.font = [UIFont systemFontOfSize:12.0f];
-            cell.imageView.backgroundColor = [UIColor clearColor];
+            cell.imageView.backgroundColor = bg;
+            cell.imageView.opaque = YES;
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         }
         ELPlaylist *pl = [_playlists objectAtIndex:indexPath.row];
         cell.textLabel.text = pl.title;
         cell.detailTextLabel.text = ([pl.subtitle length] > 0) ? pl.subtitle : @"YouTube Music Playlist";
-        UIImage *img = [[ELImageCache sharedCache] cachedImageForURL:pl.thumbURL];
-        /* Pre-rendered rounded thumbnail: zero layer.cornerRadius/masksToBounds FBO stalls while scrolling */
-        cell.imageView.image = img
-            ? [ELTheme roundedThumbnailFromImage:img size:46.0f radius:6.0f cacheKey:pl.thumbURL]
-            : [ELTheme roundedPlaceholderArtSize:46.0f radius:6.0f];
-        if (!img && [pl.thumbURL length] > 0) {
-            [[ELImageCache sharedCache] loadImageForURL:pl.thumbURL target:self action:@selector(onPlaylistArtLoaded:)];
+        UIImage *hit = ([pl.thumbURL length] > 0)
+            ? [ELTheme cachedRoundedThumbnailForSize:46.0f radius:6.0f matteColor:bg cacheKey:pl.thumbURL]
+            : nil;
+        if (hit) {
+            cell.imageView.image = hit;
+        } else {
+            cell.imageView.image = [ELTheme roundedPlaceholderArtSize:46.0f radius:6.0f matteColor:bg];
+            if ([pl.thumbURL length] > 0) {
+                [[ELImageCache sharedCache] loadRoundedThumbnailForURL:pl.thumbURL
+                                                               videoId:nil
+                                                                  size:46.0f
+                                                                radius:6.0f
+                                                            matteColor:bg
+                                                                target:self
+                                                                action:@selector(onPlaylistArtLoaded:)];
+            }
         }
         return cell;
     }

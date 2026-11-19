@@ -12,11 +12,14 @@
     UIView *_emptyFooter;
     UILabel *_emptyLabel;
     UIButton *_emptyActionBtn;
+    UIView *_playlistsHeader;
+    UIView *_likedHeader;
     NSArray *_playlists;
     NSArray *_likedSongs;
     NSMutableArray *_filterButtons;
     NSInteger _filterMode;
     BOOL _syncing;
+    BOOL _needsRefresh;
 }
 
 @end

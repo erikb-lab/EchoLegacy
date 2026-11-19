@@ -5,6 +5,63 @@
 #import "ELImageCache.h"
 #import "ELTheme.h"
 
+static UIFont *sTitleFont = nil;
+static UIFont *sSubtitleFont = nil;
+#if EL_FEATURE_DOWNLOADS
+static UIFont *sDownloadFont = nil;
+static UIImage *sIconCheck = nil;
+static UIImage *sIconDownload = nil;
+#endif
+static UIImage *sCardNorm = nil;
+static UIImage *sCardHi = nil;
+static UIImage *sPlaceholder46 = nil;
+
+static void el_track_cell_init_statics(void) {
+    if (sTitleFont) return;
+    sTitleFont = [[UIFont boldSystemFontOfSize:14.0f] retain];
+    sSubtitleFont = [[UIFont systemFontOfSize:12.0f] retain];
+    sCardNorm = [[ELTheme stretchableCardImageWithColor:[ELTheme surfaceColor]] retain];
+    sCardHi = [[ELTheme stretchableCardImageWithColor:[ELTheme surfaceHighlightColor]] retain];
+    sPlaceholder46 = [[ELTheme roundedPlaceholderArtSize:46.0f radius:6.0f] retain];
+#if EL_FEATURE_DOWNLOADS
+    sDownloadFont = [[UIFont boldSystemFontOfSize:10.0f] retain];
+    sIconCheck = [[ELTheme iconCheckSize:20.0f color:[ELTheme successColor]] retain];
+    sIconDownload = [[ELTheme iconDownloadSize:20.0f color:[ELTheme textSecondaryColor]] retain];
+#endif
+}
+
+@interface ELTrackCell (Drawing)
+- (void)drawRowInRect:(CGRect)rect;
+@end
+
+/* Single opaque Tweetie/ABTableViewCell-style drawing view: eliminates 4 subviews/layers per row */
+@interface ELTrackCellContentView : UIView {
+    ELTrackCell *_cell; /* assign, non-retaining */
+}
+- (id)initWithFrame:(CGRect)frame cell:(ELTrackCell *)cell;
+@end
+
+@implementation ELTrackCellContentView
+
+- (id)initWithFrame:(CGRect)frame cell:(ELTrackCell *)cell {
+    self = [super initWithFrame:frame];
+    if (self) {
+        _cell = cell;
+        self.opaque = YES;
+        self.backgroundColor = [ELTheme backgroundColor];
+        self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        self.contentMode = UIViewContentModeRedraw;
+    }
+    return self;
+}
+
+- (void)drawRect:(CGRect)rect {
+    (void)rect;
+    [_cell drawRowInRect:self.bounds];
+}
+
+@end
+
 @implementation ELTrackCell
 
 - (NSString *)videoId {
@@ -14,102 +71,136 @@
 - (id)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
     self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
     if (self) {
+        el_track_cell_init_statics();
+
         UIColor *bg = [ELTheme backgroundColor];
-        UIColor *cardBg = [ELTheme surfaceColor];
         self.backgroundColor = bg;
         self.opaque = YES;
         self.contentView.backgroundColor = bg;
         self.contentView.opaque = YES;
         self.selectionStyle = UITableViewCellSelectionStyleNone;
 
-        /* Stretchable rounded card surface: zero offscreen cornerRadius FBOs */
-        _cardBgView = [[UIImageView alloc] initWithFrame:CGRectMake(10.0f, 3.0f, 300.0f, 56.0f)];
-        _cardBgView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        _cardBgView.image = [ELTheme stretchableCardImageWithColor:cardBg];
-        [self.contentView addSubview:_cardBgView];
+        _rowView = [[ELTrackCellContentView alloc] initWithFrame:self.contentView.bounds cell:self];
+        [self.contentView addSubview:_rowView];
 
-        /* Pre-rendered 46x46 rounded thumbnail: zero cornerRadius+masksToBounds offscreen FBO stalls */
+        /* Pre-rendered opaque 46x46 rounded thumbnail as sibling so async art swaps never redraw text */
         _artView = [[UIImageView alloc] initWithFrame:CGRectMake(18.0f, 8.0f, 46.0f, 46.0f)];
         _artView.contentMode = UIViewContentModeScaleToFill;
-        _artView.backgroundColor = [UIColor clearColor];
-        _artView.image = [ELTheme roundedPlaceholderArtSize:46.0f radius:6.0f];
+        _artView.backgroundColor = [ELTheme surfaceColor];
+        _artView.opaque = YES;
+        _artView.image = sPlaceholder46;
         [self.contentView addSubview:_artView];
 
-        /* Opaque labels matching card surface eliminate MBX Lite alpha-blending overdraw */
 #if EL_FEATURE_DOWNLOADS
-        CGFloat labelW = 194.0f;
-#else
-        CGFloat labelW = 230.0f;
-#endif
-        _titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(74.0f, 12.0f, labelW, 19.0f)];
-        _titleLabel.backgroundColor = cardBg;
-        _titleLabel.opaque = YES;
-        _titleLabel.font = [UIFont boldSystemFontOfSize:14.0f];
-        _titleLabel.textColor = [ELTheme textPrimaryColor];
-        _titleLabel.lineBreakMode = UILineBreakModeTailTruncation;
-        [self.contentView addSubview:_titleLabel];
-
-        _subtitleLabel = [[UILabel alloc] initWithFrame:CGRectMake(74.0f, 32.0f, labelW, 17.0f)];
-        _subtitleLabel.backgroundColor = cardBg;
-        _subtitleLabel.opaque = YES;
-        _subtitleLabel.font = [UIFont systemFontOfSize:12.0f];
-        _subtitleLabel.textColor = [ELTheme textSecondaryColor];
-        _subtitleLabel.lineBreakMode = UILineBreakModeTailTruncation;
-        [self.contentView addSubview:_subtitleLabel];
-
-#if EL_FEATURE_DOWNLOADS
-        _downloadBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
-        _downloadBtn.frame = CGRectMake(270.0f, 12.0f, 34.0f, 38.0f);
-        _downloadBtn.backgroundColor = cardBg;
-        _downloadBtn.opaque = YES;
-        _downloadBtn.titleLabel.font = [UIFont boldSystemFontOfSize:10.0f];
-        [_downloadBtn addTarget:self action:@selector(onDownloadTapped) forControlEvents:UIControlEventTouchUpInside];
-        [self.contentView addSubview:_downloadBtn];
+        /* Lightweight hit-test target only (no title/image/background) */
+        _downloadHitBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
+        _downloadHitBtn.frame = CGRectMake(self.contentView.bounds.size.width - 50.0f, 8.0f, 40.0f, 46.0f);
+        _downloadHitBtn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+        [_downloadHitBtn addTarget:self action:@selector(onDownloadTapped) forControlEvents:UIControlEventTouchUpInside];
+        [self.contentView addSubview:_downloadHitBtn];
+        _dlState = -1;
+        _dlPct = -1;
 #endif
 
         _isActiveBg = NO;
-        _bgInitialized = YES;
+        _isCurrent = NO;
+        _currentInitialized = NO;
     }
     return self;
 }
 
 - (void)dealloc {
-    [_cardBgView release];
+    [_rowView release];
     [_artView release];
-    [_titleLabel release];
-    [_subtitleLabel release];
 #if EL_FEATURE_DOWNLOADS
-    [_downloadBtn release];
+    [_downloadHitBtn release];
 #endif
     [_currentVideoId release];
     [_currentThumbURL release];
+    [_titleText release];
+    [_subtitleText release];
     [_track release];
     [super dealloc];
 }
 
-- (void)applyOpaqueBackgroundActive:(BOOL)active {
-    if (_bgInitialized && _isActiveBg == active) {
-        return;
-    }
-    _bgInitialized = YES;
-    _isActiveBg = active;
-    UIColor *cardBg = active ? [ELTheme surfaceHighlightColor] : [ELTheme surfaceColor];
-    _cardBgView.image = [ELTheme stretchableCardImageWithColor:cardBg];
-    _titleLabel.backgroundColor = cardBg;
-    _subtitleLabel.backgroundColor = cardBg;
+- (void)drawRowInRect:(CGRect)rect {
+    CGFloat w = rect.size.width;
+    CGFloat h = rect.size.height;
+
+    [[ELTheme backgroundColor] setFill];
+    UIRectFill(rect);
+
+    UIImage *card = _isActiveBg ? sCardHi : sCardNorm;
+    [card drawInRect:CGRectMake(10.0f, 3.0f, w - 20.0f, h - 6.0f)];
+
 #if EL_FEATURE_DOWNLOADS
-    _downloadBtn.backgroundColor = cardBg;
+    CGFloat labelW = w - 126.0f;
+#else
+    CGFloat labelW = w - 90.0f;
 #endif
+    if (labelW < 40.0f) labelW = 40.0f;
+
+    if ([_titleText length] > 0) {
+        [(_isCurrent ? [ELTheme accentColor] : [ELTheme textPrimaryColor]) set];
+        [_titleText drawInRect:CGRectMake(74.0f, 12.0f, labelW, 19.0f)
+                      withFont:sTitleFont
+                 lineBreakMode:UILineBreakModeTailTruncation];
+    }
+
+    if ([_subtitleText length] > 0) {
+        [[ELTheme textSecondaryColor] set];
+        [_subtitleText drawInRect:CGRectMake(74.0f, 32.0f, labelW, 17.0f)
+                         withFont:sSubtitleFont
+                    lineBreakMode:UILineBreakModeTailTruncation];
+    }
+
+#if EL_FEATURE_DOWNLOADS
+    CGFloat btnX = w - 50.0f;
+    if (_dlState == ELDownloadStateDownloaded) {
+        [sIconCheck drawInRect:CGRectMake(btnX + 7.0f, 21.0f, 20.0f, 20.0f)];
+    } else if (_dlState == ELDownloadStateDownloading) {
+        [[ELTheme accentColor] set];
+        NSString *pctStr = [NSString stringWithFormat:@"%ld%%", (long)_dlPct];
+        [pctStr drawInRect:CGRectMake(btnX, 24.0f, 34.0f, 14.0f)
+                  withFont:sDownloadFont
+             lineBreakMode:UILineBreakModeClip
+                 alignment:UITextAlignmentCenter];
+    } else if (_dlState == ELDownloadStateQueued) {
+        [[ELTheme textSecondaryColor] set];
+        [@"•••" drawInRect:CGRectMake(btnX, 24.0f, 34.0f, 14.0f)
+                  withFont:sDownloadFont
+             lineBreakMode:UILineBreakModeClip
+                 alignment:UITextAlignmentCenter];
+    } else {
+        [sIconDownload drawInRect:CGRectMake(btnX + 7.0f, 21.0f, 20.0f, 20.0f)];
+    }
+#endif
+}
+
+- (void)applyActiveState:(BOOL)active {
+    if (_isActiveBg == active) return;
+    _isActiveBg = active;
+    _artView.backgroundColor = active ? [ELTheme surfaceHighlightColor] : [ELTheme surfaceColor];
+    [_rowView setNeedsDisplay];
 }
 
 - (void)setHighlighted:(BOOL)highlighted animated:(BOOL)animated {
     [super setHighlighted:highlighted animated:animated];
-    [self applyOpaqueBackgroundActive:(highlighted || self.selected)];
+    [self applyActiveState:(highlighted || self.selected)];
 }
 
 - (void)setSelected:(BOOL)selected animated:(BOOL)animated {
     [super setSelected:selected animated:animated];
-    [self applyOpaqueBackgroundActive:(selected || self.highlighted)];
+    [self applyActiveState:(selected || self.highlighted)];
+}
+
+- (void)setCurrent:(BOOL)isCurrent {
+    if (_currentInitialized && _isCurrent == isCurrent) {
+        return;
+    }
+    _currentInitialized = YES;
+    _isCurrent = isCurrent;
+    [_rowView setNeedsDisplay];
 }
 
 - (void)configureWithTrack:(ELTrack *)track isCurrent:(BOOL)isCurrent {
@@ -118,17 +209,48 @@
     [_currentVideoId release];
     _currentVideoId = [track.videoId copy];
 
-    _titleLabel.text = track.title;
-    _titleLabel.textColor = isCurrent ? [ELTheme accentColor] : [ELTheme textPrimaryColor];
-
-    if ([track.durationText length] > 0) {
-        _subtitleLabel.text = [NSString stringWithFormat:@"%@  •  %@", track.artist, track.durationText];
-    } else {
-        _subtitleLabel.text = track.artist;
+    BOOL dirty = NO;
+    NSString *newTitle = track.title ? track.title : @"";
+    if (![_titleText isEqualToString:newTitle]) {
+        [_titleText release];
+        _titleText = [newTitle copy];
+        dirty = YES;
     }
 
-    [self applyOpaqueBackgroundActive:(self.selected || self.highlighted)];
-    [self refreshDownloadState];
+    NSString *newSub = track.subtitleText ? track.subtitleText : @"";
+    if (![_subtitleText isEqualToString:newSub]) {
+        [_subtitleText release];
+        _subtitleText = [newSub copy];
+        dirty = YES;
+    }
+
+    if (!_currentInitialized || _isCurrent != isCurrent) {
+        _currentInitialized = YES;
+        _isCurrent = isCurrent;
+        dirty = YES;
+    }
+
+    BOOL active = (self.selected || self.highlighted);
+    if (_isActiveBg != active) {
+        _isActiveBg = active;
+        _artView.backgroundColor = active ? [ELTheme surfaceHighlightColor] : [ELTheme surfaceColor];
+        dirty = YES;
+    }
+
+#if EL_FEATURE_DOWNLOADS
+    float prog = 0.0f;
+    ELDownloadState st = [[ELDownloadManager sharedManager] stateForVideoId:_track.videoId progress:&prog];
+    NSInteger pct = (st == ELDownloadStateDownloading) ? (NSInteger)(prog * 100.0f) : -1;
+    if (_dlState != (NSInteger)st || _dlPct != pct) {
+        _dlState = (NSInteger)st;
+        _dlPct = pct;
+        dirty = YES;
+    }
+#endif
+
+    if (dirty) {
+        [_rowView setNeedsDisplay];
+    }
 
     /* O(1) RAM-only rounded thumbnail lookup: zero main-thread disk stat(), JPEG decode, or CG context render */
     NSString *url = ([track.thumbURL length] > 0) ? track.thumbURL : track.artURL;
@@ -153,7 +275,7 @@
         return;
     }
 
-    _artView.image = [ELTheme roundedPlaceholderArtSize:46.0f radius:6.0f];
+    _artView.image = sPlaceholder46;
     [[ELImageCache sharedCache] loadRoundedThumbnailForURL:url
                                                    videoId:track.videoId
                                                       size:46.0f
@@ -177,23 +299,15 @@
 - (void)refreshDownloadState {
 #if EL_FEATURE_DOWNLOADS
     if (!_track) return;
-    ELDownloadManager *dm = [ELDownloadManager sharedManager];
-    if ([dm isDownloaded:_track.videoId]) {
-        [_downloadBtn setTitle:nil forState:UIControlStateNormal];
-        [_downloadBtn setImage:[ELTheme iconCheckSize:20.0f color:[ELTheme successColor]] forState:UIControlStateNormal];
-    } else if ([dm isDownloading:_track.videoId]) {
-        float pct = [dm progressForVideoId:_track.videoId] * 100.0f;
-        [_downloadBtn setImage:nil forState:UIControlStateNormal];
-        [_downloadBtn setTitle:[NSString stringWithFormat:@"%d%%", (int)pct] forState:UIControlStateNormal];
-        [_downloadBtn setTitleColor:[ELTheme accentColor] forState:UIControlStateNormal];
-    } else if ([dm isQueued:_track.videoId]) {
-        [_downloadBtn setImage:nil forState:UIControlStateNormal];
-        [_downloadBtn setTitle:@"•••" forState:UIControlStateNormal];
-        [_downloadBtn setTitleColor:[ELTheme textSecondaryColor] forState:UIControlStateNormal];
-    } else {
-        [_downloadBtn setTitle:nil forState:UIControlStateNormal];
-        [_downloadBtn setImage:[ELTheme iconDownloadSize:20.0f color:[ELTheme textSecondaryColor]] forState:UIControlStateNormal];
+    float prog = 0.0f;
+    ELDownloadState st = [[ELDownloadManager sharedManager] stateForVideoId:_track.videoId progress:&prog];
+    NSInteger pct = (st == ELDownloadStateDownloading) ? (NSInteger)(prog * 100.0f) : -1;
+    if (_dlState == (NSInteger)st && _dlPct == pct) {
+        return;
     }
+    _dlState = (NSInteger)st;
+    _dlPct = pct;
+    [_rowView setNeedsDisplay];
 #endif
 }
 
@@ -201,10 +315,11 @@
 - (void)onDownloadTapped {
     if (!_track) return;
     ELDownloadManager *dm = [ELDownloadManager sharedManager];
-    if ([dm isDownloaded:_track.videoId]) {
+    ELDownloadState st = [dm stateForVideoId:_track.videoId progress:NULL];
+    if (st == ELDownloadStateDownloaded) {
         return;
     }
-    if ([dm isDownloading:_track.videoId] || [dm isQueued:_track.videoId]) {
+    if (st == ELDownloadStateDownloading || st == ELDownloadStateQueued) {
         [dm cancelDownloadForVideoId:_track.videoId];
     } else {
         [dm downloadTrack:_track];

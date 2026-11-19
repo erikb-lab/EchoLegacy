@@ -121,6 +121,8 @@
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [_tableView release]; _tableView = nil;
     [_emptyLabel release]; _emptyLabel = nil;
+    [_playlistHeader release]; _playlistHeader = nil;
+    [_playlistInfoLabel release]; _playlistInfoLabel = nil;
     [_renameBar release]; _renameBar = nil;
     [_renameField release]; _renameField = nil;
 }
@@ -202,61 +204,83 @@
                                                           lines:3] retain];
     [self.view addSubview:_emptyLabel];
 
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(refreshPlaylist) name:ELLocalPlaylistsChangedNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onPlaylistChanged) name:ELLocalPlaylistsChangedNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reloadTable) name:ELPlayerStateChangedNotification object:nil];
 
     [self refreshPlaylist];
 }
 
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    if (_needsRefresh) {
+        _needsRefresh = NO;
+        [self refreshPlaylist];
+    }
+}
+
+- (void)onPlaylistChanged {
+    if (!self.view.window) {
+        _needsRefresh = YES;
+        return;
+    }
+    [self refreshPlaylist];
+}
+
 - (void)reloadTable {
-    [_tableView reloadData];
+    if (!self.view.window) {
+        _needsRefresh = YES;
+        return;
+    }
+    [ELTrackListHelper refreshVisibleTrackHighlightInTableView:_tableView];
 }
 
 - (UIView *)buildPlaylistHeader {
-    UIView *hdr = [[[UIView alloc] initWithFrame:CGRectMake(0.0f, 0.0f, 320.0f, 78.0f)] autorelease];
-    hdr.backgroundColor = [ELTheme backgroundColor];
-    hdr.opaque = YES;
+    if (!_playlistHeader) {
+        _playlistHeader = [[UIView alloc] initWithFrame:CGRectMake(0.0f, 0.0f, 320.0f, 78.0f)];
+        _playlistHeader.backgroundColor = [ELTheme backgroundColor];
+        _playlistHeader.opaque = YES;
+
+        _playlistInfoLabel = [[UILabel alloc] initWithFrame:CGRectMake(14.0f, 6.0f, 292.0f, 18.0f)];
+        _playlistInfoLabel.backgroundColor = [ELTheme backgroundColor];
+        _playlistInfoLabel.opaque = YES;
+        _playlistInfoLabel.font = [UIFont systemFontOfSize:12.0f];
+        _playlistInfoLabel.textColor = [ELTheme textSecondaryColor];
+        [_playlistHeader addSubview:_playlistInfoLabel];
+
+        UIButton *playBtn = [ELTheme pillButtonWithTitle:@"Play"
+                                                   color:[ELTheme accentColor]
+                                                   frame:CGRectMake(12.0f, 30.0f, 64.0f, 36.0f)];
+        playBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12.0f];
+        [playBtn addTarget:self action:@selector(onPlayAll) forControlEvents:UIControlEventTouchUpInside];
+        [_playlistHeader addSubview:playBtn];
+
+        UIButton *shufBtn = [ELTheme pillButtonWithTitle:@"Shuffle"
+                                                   color:[ELTheme surfaceHighlightColor]
+                                                   frame:CGRectMake(82.0f, 30.0f, 70.0f, 36.0f)];
+        shufBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12.0f];
+        [shufBtn addTarget:self action:@selector(onShuffleAll) forControlEvents:UIControlEventTouchUpInside];
+        [_playlistHeader addSubview:shufBtn];
+
+        UIButton *addBtn = [ELTheme pillButtonWithTitle:@"+ Add"
+                                                  color:[ELTheme surfaceHighlightColor]
+                                                  frame:CGRectMake(158.0f, 30.0f, 72.0f, 36.0f)];
+        addBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12.0f];
+        [addBtn addTarget:self action:@selector(onAddTracks) forControlEvents:UIControlEventTouchUpInside];
+        [_playlistHeader addSubview:addBtn];
+
+        UIButton *renBtn = [ELTheme pillButtonWithTitle:@"Rename"
+                                                  color:[ELTheme surfaceHighlightColor]
+                                                  frame:CGRectMake(236.0f, 30.0f, 72.0f, 36.0f)];
+        renBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12.0f];
+        [renBtn addTarget:self action:@selector(onShowRename) forControlEvents:UIControlEventTouchUpInside];
+        [_playlistHeader addSubview:renBtn];
+    }
 
     NSUInteger count = [_tracks count];
-    UILabel *info = [[[UILabel alloc] initWithFrame:CGRectMake(14.0f, 6.0f, 292.0f, 18.0f)] autorelease];
-    info.backgroundColor = [ELTheme backgroundColor];
-    info.opaque = YES;
-    info.font = [UIFont systemFontOfSize:12.0f];
-    info.textColor = [ELTheme textSecondaryColor];
-    info.text = [NSString stringWithFormat:@"%lu offline %@",
-                 (unsigned long)count,
-                 (count == 1 ? @"track" : @"tracks")];
-    [hdr addSubview:info];
-
-    UIButton *playBtn = [ELTheme pillButtonWithTitle:@"Play"
-                                               color:[ELTheme accentColor]
-                                               frame:CGRectMake(12.0f, 30.0f, 64.0f, 36.0f)];
-    playBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12.0f];
-    [playBtn addTarget:self action:@selector(onPlayAll) forControlEvents:UIControlEventTouchUpInside];
-    [hdr addSubview:playBtn];
-
-    UIButton *shufBtn = [ELTheme pillButtonWithTitle:@"Shuffle"
-                                               color:[ELTheme surfaceHighlightColor]
-                                               frame:CGRectMake(82.0f, 30.0f, 70.0f, 36.0f)];
-    shufBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12.0f];
-    [shufBtn addTarget:self action:@selector(onShuffleAll) forControlEvents:UIControlEventTouchUpInside];
-    [hdr addSubview:shufBtn];
-
-    UIButton *addBtn = [ELTheme pillButtonWithTitle:@"+ Add"
-                                              color:[ELTheme surfaceHighlightColor]
-                                              frame:CGRectMake(158.0f, 30.0f, 72.0f, 36.0f)];
-    addBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12.0f];
-    [addBtn addTarget:self action:@selector(onAddTracks) forControlEvents:UIControlEventTouchUpInside];
-    [hdr addSubview:addBtn];
-
-    UIButton *renBtn = [ELTheme pillButtonWithTitle:@"Rename"
-                                              color:[ELTheme surfaceHighlightColor]
-                                              frame:CGRectMake(236.0f, 30.0f, 72.0f, 36.0f)];
-    renBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12.0f];
-    [renBtn addTarget:self action:@selector(onShowRename) forControlEvents:UIControlEventTouchUpInside];
-    [hdr addSubview:renBtn];
-
-    return hdr;
+    _playlistInfoLabel.text = [NSString stringWithFormat:@"%lu offline %@",
+                               (unsigned long)count,
+                               (count == 1 ? @"track" : @"tracks")];
+    return _playlistHeader;
 }
 
 - (void)refreshPlaylist {

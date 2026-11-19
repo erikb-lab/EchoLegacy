@@ -23,7 +23,39 @@ static NSString *el_string_or_default(NSDictionary *dict, NSString *key, NSStrin
     [_durationText release];
     [_thumbURL release];
     [_artURL release];
+    [_subtitleText release];
     [super dealloc];
+}
+
+- (void)setArtist:(NSString *)artist {
+    if (_artist != artist) {
+        [_artist release];
+        _artist = [artist copy];
+        [_subtitleText release];
+        _subtitleText = nil;
+    }
+}
+
+- (void)setDurationText:(NSString *)durationText {
+    if (_durationText != durationText) {
+        [_durationText release];
+        _durationText = [durationText copy];
+        [_subtitleText release];
+        _subtitleText = nil;
+    }
+}
+
+- (NSString *)subtitleText {
+    if (!_subtitleText) {
+        if ([_durationText length] > 0) {
+            _subtitleText = [[NSString alloc] initWithFormat:@"%@  •  %@",
+                             _artist ? _artist : @"",
+                             _durationText];
+        } else {
+            _subtitleText = [_artist copy];
+        }
+    }
+    return _subtitleText;
 }
 
 - (NSDictionary *)toDictionary {

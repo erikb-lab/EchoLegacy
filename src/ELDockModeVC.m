@@ -52,18 +52,17 @@ static const CGFloat kDockProgressWidth = 272.0f;
 }
 
 - (void)applyBackdropColor:(UIColor *)dominant {
-    if (!_backdropGradient) return;
+    if (!_backdropView) return;
     if (!dominant) dominant = [ELTheme dominantBackdropColorFromImage:nil];
     UIColor *darkTop = [ELTheme darkerShadeOfColor:dominant factor:0.42f];
     UIColor *darkBot = [ELTheme darkerShadeOfColor:dominant factor:0.14f];
     self.view.backgroundColor = darkBot;
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    _backdropGradient.colors = [NSArray arrayWithObjects:
-                                (id)[darkTop CGColor],
-                                (id)[darkBot CGColor],
-                                nil];
-    [CATransaction commit];
+    _backdropView.image = [ELTheme verticalGradientImageWithHeight:460.0f
+                                                          topColor:darkTop
+                                                          midColor:nil
+                                                       midLocation:0.0f
+                                                       bottomColor:darkBot
+                                                            opaque:YES];
 }
 
 - (void)viewDidLoad {
@@ -73,9 +72,11 @@ static const CGFloat kDockProgressWidth = 272.0f;
     UIColor *pillHi = [UIColor colorWithWhite:1.0f alpha:0.28f];
     UIColor *secondaryWhite = [UIColor colorWithWhite:1.0f alpha:0.70f];
 
-    _backdropGradient = [[CAGradientLayer layer] retain];
-    _backdropGradient.frame = CGRectMake(0.0f, 0.0f, 320.0f, 460.0f);
-    [self.view.layer insertSublayer:_backdropGradient atIndex:0];
+    _backdropView = [[UIImageView alloc] initWithFrame:CGRectMake(0.0f, 0.0f, 320.0f, 460.0f)];
+    _backdropView.contentMode = UIViewContentModeScaleToFill;
+    _backdropView.opaque = YES;
+    _backdropView.userInteractionEnabled = NO;
+    [self.view addSubview:_backdropView];
     [self applyBackdropColor:nil];
 
     _clockFormatter = [[NSDateFormatter alloc] init];
@@ -114,6 +115,7 @@ static const CGFloat kDockProgressWidth = 272.0f;
     _artView = [[UIImageView alloc] initWithFrame:CGRectMake(64.0f, 58.0f, 192.0f, 192.0f)];
     _artView.contentMode = UIViewContentModeScaleAspectFill;
     _artView.clipsToBounds = YES;
+    _artView.opaque = YES;
     _artView.backgroundColor = [ELTheme surfaceColor];
     _artView.image = [ELTheme placeholderArtImage];
     [self.view addSubview:_artView];
@@ -189,15 +191,17 @@ static const CGFloat kDockProgressWidth = 272.0f;
     _dimOverlay = [[UIView alloc] initWithFrame:CGRectMake(0.0f, 0.0f, 320.0f, 460.0f)];
     _dimOverlay.backgroundColor = [UIColor blackColor];
     _dimOverlay.alpha = 0.0f;
+    _dimOverlay.hidden = YES;
     _dimOverlay.userInteractionEnabled = NO;
     [self.view addSubview:_dimOverlay];
 
     _lastElapsedSec = -1;
     _lastDurationSec = -1;
+    _lastPlayIconState = -1;
 
     NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
     [nc addObserver:self selector:@selector(refreshAll) name:ELPlayerStateChangedNotification object:nil];
-    [nc addObserver:self selector:@selector(refreshProgress) name:ELPlayerProgressNotification object:nil];
+    [nc addObserver:self selector:@selector(onProgressNotification:) name:ELPlayerProgressNotification object:nil];
     [nc addObserver:self selector:@selector(onAppDidBecomeActive) name:UIApplicationDidBecomeActiveNotification object:nil];
     [nc addObserver:self selector:@selector(onAppWillResignActive) name:UIApplicationWillResignActiveNotification object:nil];
 
@@ -208,7 +212,7 @@ static const CGFloat kDockProgressWidth = 272.0f;
 - (void)releaseViewOutlets {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [self stopClockTimer];
-    [_backdropGradient release]; _backdropGradient = nil;
+    [_backdropView release]; _backdropView = nil;
     [_clockLabel release]; _clockLabel = nil;
     [_dimBtn release]; _dimBtn = nil;
     [_artView release]; _artView = nil;
@@ -283,6 +287,7 @@ static const CGFloat kDockProgressWidth = 272.0f;
     static const CGFloat kDimAlphas[] = { 0.0f, 0.45f, 0.70f };
     static NSString *const kDimTitles[] = { @"Dim", @"Dim 45%", @"Dim 70%" };
     _dimOverlay.alpha = kDimAlphas[_dimLevel];
+    _dimOverlay.hidden = (_dimLevel == 0);
     [_dimBtn setTitle:kDimTitles[_dimLevel] forState:UIControlStateNormal];
 }
 
@@ -298,37 +303,84 @@ static const CGFloat kDockProgressWidth = 272.0f;
     [self applyBackdropColor:[ELTheme dominantBackdropColorFromImage:img cacheKey:artKey]];
 }
 
-- (void)refreshArtworkForTrack:(ELTrack *)track {
-    UIImage *localArt = nil;
 #if EL_FEATURE_DOWNLOADS
-    localArt = [[ELDownloadManager sharedManager] localArtImageForVideoId:track.videoId];
+- (void)localArtWorker:(NSDictionary *)args {
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    [NSThread setThreadPriority:0.25];
+    NSString *vid = [args objectForKey:@"videoId"];
+    NSString *url = [args objectForKey:@"url"];
+    UIImage *img = [[ELDownloadManager sharedManager] localArtImageForVideoId:vid];
+    NSMutableDictionary *res = [NSMutableDictionary dictionaryWithObjectsAndKeys:
+                                vid ? vid : @"", @"videoId",
+                                url ? url : @"", @"url",
+                                nil];
+    if (img) [res setObject:img forKey:@"image"];
+    [self performSelectorOnMainThread:@selector(onLocalArtLoaded:) withObject:res waitUntilDone:NO];
+    [pool release];
+}
+
+- (void)onLocalArtLoaded:(NSDictionary *)res {
+    NSString *vid = [res objectForKey:@"videoId"];
+    ELTrack *cur = [[ELAudioEngine sharedEngine] currentTrack];
+    if (!cur || ![cur.videoId isEqualToString:vid]) return;
+    UIImage *img = [res objectForKey:@"image"];
+    if (img) {
+        NSString *localKey = [NSString stringWithFormat:@"local:%@", vid];
+        [_loadedArtURL release];
+        _loadedArtURL = nil;
+        [self setArtworkImage:img forKey:localKey];
+        return;
+    }
+    NSString *url = [res objectForKey:@"url"];
+    if ([url length] > 0) {
+        [_loadedArtURL release];
+        _loadedArtURL = [url copy];
+        [[ELImageCache sharedCache] loadImageForURL:url target:self action:@selector(onArtLoaded:)];
+    }
+}
 #endif
-    if (localArt) {
-        NSString *localKey = [NSString stringWithFormat:@"local:%@", track.videoId];
-        if (![_loadedArtKey isEqualToString:localKey]) {
+
+- (void)refreshArtworkForTrack:(ELTrack *)track {
+    NSString *url = ([track.artURL length] > 0) ? track.artURL : track.thumbURL;
+    NSString *localKey = ([track.videoId length] > 0)
+        ? [NSString stringWithFormat:@"local:%@", track.videoId]
+        : nil;
+    if (localKey && [_loadedArtKey isEqualToString:localKey]) return;
+    if ([url length] > 0 && [_loadedArtKey isEqualToString:url]) return;
+
+    if ([url length] > 0) {
+        UIImage *mem = [[ELImageCache sharedCache] memoryCachedImageForURL:url];
+        if (mem) {
             [_loadedArtURL release];
-            _loadedArtURL = nil;
-            [self setArtworkImage:localArt forKey:localKey];
+            _loadedArtURL = [url copy];
+            [self setArtworkImage:mem forKey:url];
+            return;
+        }
+    }
+
+#if EL_FEATURE_DOWNLOADS
+    if ([track.videoId length] > 0 && [[ELDownloadManager sharedManager] isDownloaded:track.videoId]) {
+        NSString *pendingKey = [NSString stringWithFormat:@"pending:local:%@", track.videoId];
+        if (![_loadedArtKey isEqualToString:pendingKey]) {
+            [_loadedArtURL release];
+            _loadedArtURL = [url copy];
+            [self setArtworkImage:[ELTheme placeholderArtImage] forKey:pendingKey];
+            NSDictionary *args = [NSDictionary dictionaryWithObjectsAndKeys:
+                                  track.videoId, @"videoId",
+                                  url ? url : @"", @"url",
+                                  nil];
+            [NSThread detachNewThreadSelector:@selector(localArtWorker:) toTarget:self withObject:args];
         }
         return;
     }
+#endif
 
-    NSString *url = ([track.artURL length] > 0) ? track.artURL : track.thumbURL;
     if ([url length] == 0) {
         if (![_loadedArtKey isEqualToString:@"placeholder"]) {
             [_loadedArtURL release];
             _loadedArtURL = nil;
             [self setArtworkImage:[ELTheme placeholderArtImage] forKey:@"placeholder"];
         }
-        return;
-    }
-    if ([_loadedArtKey isEqualToString:url]) return;
-
-    UIImage *cached = [[ELImageCache sharedCache] cachedImageForURL:url];
-    if (cached) {
-        [_loadedArtURL release];
-        _loadedArtURL = [url copy];
-        [self setArtworkImage:cached forKey:url];
         return;
     }
 
@@ -350,8 +402,33 @@ static const CGFloat kDockProgressWidth = 272.0f;
 }
 
 #if EL_FEATURE_LYRICS
+- (void)cachedLyricsWorker:(NSDictionary *)args {
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    [NSThread setThreadPriority:0.25];
+    NSString *vid = [args objectForKey:@"videoId"];
+    NSNumber *gen = [args objectForKey:@"gen"];
+    NSArray *lines = [[ELLyricsClient sharedClient] cachedLyricsForVideoId:vid];
+    NSMutableDictionary *res = [NSMutableDictionary dictionaryWithObjectsAndKeys:
+                                vid ? vid : @"", @"videoId",
+                                gen, @"gen",
+                                nil];
+    if (lines) [res setObject:lines forKey:@"lines"];
+    [self performSelectorOnMainThread:@selector(onCachedLyricsLoaded:) withObject:res waitUntilDone:NO];
+    [pool release];
+}
+
+- (void)onCachedLyricsLoaded:(NSDictionary *)res {
+    if ([[res objectForKey:@"gen"] integerValue] != _lyricsLoadGen) return;
+    NSArray *lines = [res objectForKey:@"lines"];
+    [_cachedLyrics release];
+    _cachedLyrics = [lines retain];
+    _activeLyricIndex = -1;
+    [self updateActiveLyricForTime:[[ELAudioEngine sharedEngine] currentTime]];
+}
+
 - (void)refreshCachedLyricsForTrack:(ELTrack *)track {
     if (!track || [track.videoId length] == 0) {
+        _lyricsLoadGen++;
         [_lyricsVideoId release]; _lyricsVideoId = nil;
         [_cachedLyrics release]; _cachedLyrics = nil;
         _activeLyricIndex = -1;
@@ -360,12 +437,18 @@ static const CGFloat kDockProgressWidth = 272.0f;
     }
     if (_lyricsVideoId && [_lyricsVideoId isEqualToString:track.videoId]) return;
 
+    _lyricsLoadGen++;
     [_lyricsVideoId release];
     _lyricsVideoId = [track.videoId copy];
     [_cachedLyrics release];
-    _cachedLyrics = [[[ELLyricsClient sharedClient] cachedLyricsForVideoId:track.videoId] retain];
+    _cachedLyrics = nil;
     _activeLyricIndex = -1;
     _lyricLabel.text = @"";
+    NSDictionary *args = [NSDictionary dictionaryWithObjectsAndKeys:
+                          track.videoId, @"videoId",
+                          [NSNumber numberWithInteger:_lyricsLoadGen], @"gen",
+                          nil];
+    [NSThread detachNewThreadSelector:@selector(cachedLyricsWorker:) toTarget:self withObject:args];
 }
 
 - (void)updateActiveLyricForTime:(double)curTime {
@@ -395,11 +478,8 @@ static const CGFloat kDockProgressWidth = 272.0f;
 }
 #endif
 
-- (void)refreshProgress {
+- (void)updateProgressWithCurrentTime:(double)cur duration:(double)dur {
     if (![self isViewLoaded] || !self.view.window) return;
-    ELAudioEngine *eng = [ELAudioEngine sharedEngine];
-    double dur = [eng duration];
-    double cur = [eng currentTime];
 
     NSInteger durSec = (dur > 0.0) ? (NSInteger)dur : 0;
     if (durSec != _lastDurationSec) {
@@ -415,8 +495,8 @@ static const CGFloat kDockProgressWidth = 272.0f;
     CGFloat frac = (dur > 0.0) ? (CGFloat)(cur / dur) : 0.0f;
     if (frac < 0.0f) frac = 0.0f;
     if (frac > 1.0f) frac = 1.0f;
-    CGFloat targetW = floorf(kDockProgressWidth * frac * 2.0f) * 0.5f;
-    if (fabsf(_progressFill.frame.size.width - targetW) >= 0.5f) {
+    CGFloat targetW = floorf(kDockProgressWidth * frac);
+    if (_progressFill.frame.size.width != targetW) {
         _progressFill.frame = CGRectMake(24.0f, 309.0f, targetW, 3.0f);
     }
 
@@ -425,19 +505,43 @@ static const CGFloat kDockProgressWidth = 272.0f;
 #endif
 }
 
+- (void)onProgressNotification:(NSNotification *)note {
+    NSDictionary *info = [note userInfo];
+    NSNumber *curNum = [info objectForKey:@"currentTime"];
+    NSNumber *durNum = [info objectForKey:@"duration"];
+    if (curNum && durNum) {
+        [self updateProgressWithCurrentTime:[curNum doubleValue] duration:[durNum doubleValue]];
+    } else {
+        [self refreshProgress];
+    }
+}
+
+- (void)refreshProgress {
+    if (![self isViewLoaded] || !self.view.window) return;
+    ELAudioEngine *eng = [ELAudioEngine sharedEngine];
+    [self updateProgressWithCurrentTime:[eng currentTime] duration:[eng duration]];
+}
+
 - (void)refreshAll {
     ELAudioEngine *eng = [ELAudioEngine sharedEngine];
     ELTrack *track = [eng currentTrack];
 
     if (eng.state == ELPlayerStateLoading) {
-        [_playPauseBtn setImage:nil forState:UIControlStateNormal];
+        if (_lastPlayIconState != 2) {
+            _lastPlayIconState = 2;
+            [_playPauseBtn setImage:nil forState:UIControlStateNormal];
+        }
         [_spinner startAnimating];
     } else {
         [_spinner stopAnimating];
-        UIImage *icon = (eng.state == ELPlayerStatePlaying)
-            ? [ELTheme iconPauseSize:36.0f color:[UIColor whiteColor]]
-            : [ELTheme iconPlaySize:36.0f color:[UIColor whiteColor]];
-        [_playPauseBtn setImage:icon forState:UIControlStateNormal];
+        NSInteger iconState = (eng.state == ELPlayerStatePlaying) ? 1 : 0;
+        if (_lastPlayIconState != iconState) {
+            _lastPlayIconState = iconState;
+            UIImage *icon = (iconState == 1)
+                ? [ELTheme iconPauseSize:36.0f color:[UIColor whiteColor]]
+                : [ELTheme iconPlaySize:36.0f color:[UIColor whiteColor]];
+            [_playPauseBtn setImage:icon forState:UIControlStateNormal];
+        }
     }
 
     if (!track) {

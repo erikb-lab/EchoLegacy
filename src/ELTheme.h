@@ -54,9 +54,19 @@
 + (UIImage *)stretchablePillImageWithHeight:(CGFloat)height color:(UIColor *)color;
 + (UIImage *)stretchableCardImageWithColor:(UIColor *)color;
 + (UIImage *)roundedRectImageWithSize:(CGSize)size radius:(CGFloat)radius fillColor:(UIColor *)fillColor borderColor:(UIColor *)borderColor;
++ (UIImage *)verticalGradientImageWithHeight:(CGFloat)h
+                                    topColor:(UIColor *)top
+                                    midColor:(UIColor *)mid
+                                 midLocation:(CGFloat)midLoc
+                                 bottomColor:(UIColor *)bottom
+                                      opaque:(BOOL)opaque;
 + (UIImage *)roundedPlaceholderArtSize:(CGFloat)size radius:(CGFloat)radius;
++ (UIImage *)roundedPlaceholderArtSize:(CGFloat)size radius:(CGFloat)radius matteColor:(UIColor *)matteColor;
 + (UIImage *)cachedRoundedThumbnailForSize:(CGFloat)size radius:(CGFloat)radius cacheKey:(NSString *)cacheKey;
++ (UIImage *)cachedRoundedThumbnailForSize:(CGFloat)size radius:(CGFloat)radius matteColor:(UIColor *)matteColor cacheKey:(NSString *)cacheKey;
 + (UIImage *)roundedThumbnailFromImage:(UIImage *)image size:(CGFloat)size radius:(CGFloat)radius cacheKey:(NSString *)cacheKey;
++ (UIImage *)roundedThumbnailFromImage:(UIImage *)image size:(CGFloat)size radius:(CGFloat)radius matteColor:(UIColor *)matteColor cacheKey:(NSString *)cacheKey;
 + (void)clearThumbnailCache;
++ (void)flushMemoryCaches;
 
 @end

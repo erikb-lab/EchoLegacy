@@ -22,6 +22,9 @@ extern NSString *const ELLocalPlaylistsChangedNotification;
     NSMutableArray *_playlists;
     NSString *_storePath;
     NSUInteger _nextIdCounter;
+    NSCondition *_saveCond;
+    NSArray *_pendingSaveSnapshot;
+    BOOL _saveThreadStarted;
 }
 
 + (ELLocalPlaylistManager *)sharedManager;

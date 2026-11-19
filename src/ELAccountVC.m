@@ -16,17 +16,19 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
 @implementation ELAccountVC
 
 - (UIView *)newCardWithFrame:(CGRect)frame {
-    UIView *card = [[UIView alloc] initWithFrame:frame];
-    card.backgroundColor = [ELTheme surfaceColor];
-    card.layer.cornerRadius = 12.0f;
-    card.layer.masksToBounds = YES;
+    UIImageView *card = [[UIImageView alloc] initWithFrame:frame];
+    card.image = [ELTheme stretchableCardImageWithColor:[ELTheme surfaceColor]];
+    card.backgroundColor = [ELTheme backgroundColor];
+    card.opaque = YES;
+    card.userInteractionEnabled = YES;
     [_scrollView addSubview:card];
     return card;
 }
 
 - (UILabel *)newLabelWithFrame:(CGRect)frame font:(UIFont *)font color:(UIColor *)color lines:(NSInteger)lines parent:(UIView *)parent {
     UILabel *lbl = [[UILabel alloc] initWithFrame:frame];
-    lbl.backgroundColor = [UIColor clearColor];
+    lbl.backgroundColor = [ELTheme surfaceColor];
+    lbl.opaque = YES;
     lbl.font = font;
     lbl.textColor = color;
     if (lines != 1) lbl.numberOfLines = lines;
@@ -139,9 +141,8 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
     /* 1. Google Account Status Card */
     UIView *card = [[self newCardWithFrame:CGRectMake(16, 14, 288, 150)] autorelease];
 
-    _statusDot = [[UIView alloc] initWithFrame:CGRectMake(16, 20, 10, 10)];
-    _statusDot.layer.cornerRadius = 5.0f;
-    _statusDot.layer.masksToBounds = YES;
+    _statusDot = [[UIImageView alloc] initWithFrame:CGRectMake(16, 20, 10, 10)];
+    _statusDot.backgroundColor = [UIColor clearColor];
     [card addSubview:_statusDot];
 
     _accountTitleLabel = [self newLabelWithFrame:CGRectMake(34, 13, 238, 24)
@@ -206,14 +207,17 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
                                       parent:_codeCard];
     _codeHintLabel.textAlignment = UITextAlignmentCenter;
 
+    UIImageView *codeBg = [[[UIImageView alloc] initWithFrame:CGRectMake(14, 54, 260, 44)] autorelease];
+    codeBg.image = [ELTheme stretchablePillImageWithHeight:44.0f color:[ELTheme backgroundColor]];
+    [_codeCard addSubview:codeBg];
+
     _codeValueLabel = [self newLabelWithFrame:CGRectMake(14, 54, 260, 44)
                                          font:[UIFont boldSystemFontOfSize:20.0f]
                                         color:[ELTheme textPrimaryColor]
                                         lines:1
                                        parent:_codeCard];
-    _codeValueLabel.backgroundColor = [ELTheme backgroundColor];
-    _codeValueLabel.layer.cornerRadius = 8.0f;
-    _codeValueLabel.layer.masksToBounds = YES;
+    _codeValueLabel.backgroundColor = [UIColor clearColor];
+    _codeValueLabel.opaque = NO;
     _codeValueLabel.textAlignment = UITextAlignmentCenter;
 
     _codeRevealBtn = [[UIButton buttonWithType:UIButtonTypeCustom] retain];
@@ -386,9 +390,7 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
 
 #if EL_FEATURE_LYRICS
 - (void)onLyricsToggled {
-    NSUserDefaults *defs = [NSUserDefaults standardUserDefaults];
-    [defs setBool:_lyricsSwitch.on forKey:kOnlineLyricsDefaultsKey];
-    [defs synchronize];
+    [[NSUserDefaults standardUserDefaults] setBool:_lyricsSwitch.on forKey:kOnlineLyricsDefaultsKey];
     [[ELAudioEngine sharedEngine] postToast:(_lyricsSwitch.on ? @"Online Lyrics: On (lrclib.net)" : @"Online Lyrics: Off (cached only)")];
 }
 #endif
@@ -459,8 +461,15 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
     [NSThread detachNewThreadSelector:@selector(checkUpdateWorker) toTarget:self withObject:nil];
 }
 
+- (void)setUpdateButtonColor:(UIColor *)color {
+    UIColor *hi = [ELTheme darkerShadeOfColor:color factor:0.78f];
+    [_updateBtn setBackgroundImage:[ELTheme stretchablePillImageWithHeight:36.0f color:color] forState:UIControlStateNormal];
+    [_updateBtn setBackgroundImage:[ELTheme stretchablePillImageWithHeight:36.0f color:hi] forState:UIControlStateHighlighted];
+}
+
 - (void)checkUpdateWorker {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    [NSThread setThreadPriority:0.25];
     NSString *err = nil;
     ELUpdateInfo *info = [[ELUpdater sharedUpdater] checkForUpdateWithError:&err];
     NSMutableDictionary *res = [NSMutableDictionary dictionary];
@@ -488,11 +497,11 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
             ? [NSString stringWithFormat:@" (%.0f KB)", (double)info.binarySize / 1024.0]
             : @"";
         _updateStatusLabel.text = [NSString stringWithFormat:@"New build ready: %@%@", info.releaseTitle, sz];
-        _updateBtn.backgroundColor = [ELTheme accentColor];
+        [self setUpdateButtonColor:[ELTheme accentColor]];
         [_updateBtn setTitle:@"Install Update from GitHub" forState:UIControlStateNormal];
     } else {
         _updateStatusLabel.text = [NSString stringWithFormat:@"Up to date (%@)", info.releaseTitle];
-        _updateBtn.backgroundColor = [ELTheme surfaceHighlightColor];
+        [self setUpdateButtonColor:[ELTheme surfaceHighlightColor]];
         [_updateBtn setTitle:@"Re-check GitHub" forState:UIControlStateNormal];
     }
 }
@@ -508,6 +517,7 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
 
 - (void)installUpdateWorker:(ELUpdateInfo *)info {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    [NSThread setThreadPriority:0.25];
     NSString *err = nil;
     NSString *ipaPath = nil;
     BOOL ok = [[ELUpdater sharedUpdater] installUpdate:info savedIPAPath:&ipaPath error:&err];
@@ -530,7 +540,7 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
         _pendingUpdate = nil;
         _updateStatusLabel.text = [NSString stringWithFormat:@"Updated to %@!\nTap below to close and relaunch.",
                                    [[ELUpdater sharedUpdater] installedVersionLabel]];
-        _updateBtn.backgroundColor = [ELTheme successColor];
+        [self setUpdateButtonColor:[ELTheme successColor]];
         [_updateBtn setTitle:@"Close App to Relaunch" forState:UIControlStateNormal];
         UIAlertView *av = [[[UIAlertView alloc] initWithTitle:@"Update Installed"
                                                       message:@"EchoLegacy has been updated from GitHub. Tap Relaunch to close the app, then tap the EchoLegacy icon."
@@ -572,7 +582,7 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
 
     CGFloat nextY = 222.0f;
     if ([auth isSignedIn]) {
-        _statusDot.backgroundColor = [ELTheme successColor];
+        _statusDot.image = [ELTheme circlePillImageWithSize:10.0f color:[ELTheme successColor]];
         NSString *name = [auth accountName];
         _accountTitleLabel.text = ([name length] > 0) ? name : @"Google Account";
         NSUInteger plCount = [[yt cachedPlaylists] count];
@@ -590,7 +600,8 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
         [self maskUserCodeImmediately];
     } else {
         BOOL hasCID = [auth hasConfiguredClientId];
-        _statusDot.backgroundColor = hasCID ? [ELTheme accentColor] : [ELTheme textSecondaryColor];
+        _statusDot.image = [ELTheme circlePillImageWithSize:10.0f
+                                                      color:(hasCID ? [ELTheme accentColor] : [ELTheme textSecondaryColor])];
         _accountTitleLabel.text = @"Not Signed In";
         if (hasCID) {
             _accountSubLabel.text = @"OAuth Client ID configured. Sign in with Google to sync your YouTube Music playlists and liked songs.";
@@ -707,6 +718,7 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
 
 - (void)deviceSignInWorker:(NSNumber *)sessionNum {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    [NSThread setThreadPriority:0.25];
     NSInteger session = [sessionNum integerValue];
 
     NSString *err = nil;
@@ -738,11 +750,13 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
         [NSThread sleepForTimeInterval:(NSTimeInterval)interval];
         if (session != _pollSession) { finished = YES; break; }
 
+        NSAutoreleasePool *iterPool = [[NSAutoreleasePool alloc] init];
         NSString *pollErr = nil;
         ELAuthPollResult res = [[ELAuthManager sharedManager] pollTokenForDeviceCode:info.deviceCode error:&pollErr];
         if (res == ELAuthPollSuccess) {
             finished = YES;
             [self performSelectorOnMainThread:@selector(onDeviceSignInSucceeded) withObject:nil waitUntilDone:NO];
+            [iterPool release];
             break;
         } else if (res == ELAuthPollSlowDown) {
             interval += 5;
@@ -752,8 +766,10 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
             [self performSelectorOnMainThread:@selector(onDeviceCodeError:)
                                    withObject:(pollErr ? pollErr : @"Sign-in expired or cancelled")
                                 waitUntilDone:NO];
+            [iterPool release];
             break;
         }
+        [iterPool release];
     }
 
     if (!finished && session == _pollSession) {
@@ -803,6 +819,7 @@ static NSString *const kOnlineLyricsDefaultsKey = @"ELOnlineLyricsEnabled";
 
 - (void)syncWorker {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    [NSThread setThreadPriority:0.25];
     NSString *err = nil;
     BOOL ok = [[ELYouTubeClient sharedClient] syncLibraryWithError:&err];
     NSMutableDictionary *res = [NSMutableDictionary dictionaryWithObject:[NSNumber numberWithBool:ok] forKey:@"ok"];

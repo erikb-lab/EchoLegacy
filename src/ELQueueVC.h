@@ -4,6 +4,8 @@
     UITableView *_tableView;
     UILabel *_headerLabel;
     UIButton *_shuffleBtn;
+    BOOL _needsRefresh;
+    NSUInteger _lastQueueCount;
 }
 
 @end

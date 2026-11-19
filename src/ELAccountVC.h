@@ -12,7 +12,7 @@
     UITextFieldDelegate
 > {
     UIScrollView *_scrollView;
-    UIView *_statusDot;
+    UIImageView *_statusDot;
     UILabel *_accountTitleLabel;
     UILabel *_accountSubLabel;
 

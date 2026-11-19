@@ -16,6 +16,11 @@
         _tracks = [[NSMutableArray alloc] init];
         _loadGen = 0;
         _isLoadingMore = NO;
+#if EL_FEATURE_DOWNLOADS
+        _dlBtnState = -1;
+        _dlBtnCompleted = -1;
+        _dlBtnTotal = -1;
+#endif
         self.title = playlist.title ? playlist.title : @"Playlist";
     }
     return self;
@@ -29,6 +34,9 @@
     [_headerInfoLabel release]; _headerInfoLabel = nil;
 #if EL_FEATURE_DOWNLOADS
     [_downloadPlaylistBtn release]; _downloadPlaylistBtn = nil;
+    _dlBtnState = -1;
+    _dlBtnCompleted = -1;
+    _dlBtnTotal = -1;
 #endif
 }
 
@@ -79,17 +87,7 @@
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onBatchProgress) name:ELDownloadBatchProgressNotification object:nil];
 #endif
 
-    /* 1. Instant 0.0s render if playlist is cached on disk */
-    NSArray *cached = [[ELYouTubeClient sharedClient] cachedTracksForPlaylistId:_playlist.playlistId];
-    if (cached && [cached count] > 0) {
-        [_tracks removeAllObjects];
-        [_tracks addObjectsFromArray:cached];
-        _isLoadingMore = YES;
-        _tableView.tableHeaderView = [self buildPlaylistHeader];
-        [_tableView reloadData];
-    } else {
-        [_spinner startAnimating];
-    }
+    [_spinner startAnimating];
 
     NSInteger gen = 0;
     @synchronized(self) {
@@ -101,8 +99,24 @@
                            withObject:[NSNumber numberWithInteger:gen]];
 }
 
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    if (_needsRefresh) {
+        _needsRefresh = NO;
+        [ELTrackListHelper refreshVisibleTrackHighlightInTableView:_tableView];
+#if EL_FEATURE_DOWNLOADS
+        [ELTrackListHelper refreshVisibleTrackCellsInTableView:_tableView forVideoId:nil];
+        [self updateDownloadButtonState];
+#endif
+    }
+}
+
 - (void)reloadCells {
-    [_tableView reloadData];
+    if (!self.view.window) {
+        _needsRefresh = YES;
+        return;
+    }
+    [ELTrackListHelper refreshVisibleTrackHighlightInTableView:_tableView];
 }
 
 #if EL_FEATURE_DOWNLOADS
@@ -118,34 +132,56 @@
 - (void)updateDownloadButtonState {
     if (!_downloadPlaylistBtn) return;
     ELDownloadManager *dm = [ELDownloadManager sharedManager];
+    NSInteger state = 0;
+    NSInteger completed = 0;
+    NSInteger total = 0;
     NSString *title = @"Download Playlist";
     UIColor *fill = [ELTheme surfaceHighlightColor];
     if (dm.isBatchDownloading && dm.batchTotal > 0) {
-        title = [NSString stringWithFormat:@"Cancel (%ld/%ld)", (long)dm.batchCompleted, (long)dm.batchTotal];
+        state = 2;
+        completed = dm.batchCompleted;
+        total = dm.batchTotal;
+        title = [NSString stringWithFormat:@"Cancel (%ld/%ld)", (long)completed, (long)total];
         fill = [ELTheme accentColor];
     } else if ([self allTracksDownloaded]) {
+        state = 1;
         title = @"Saved Offline";
         fill = [ELTheme successColor];
     }
+    if (_dlBtnState == state && _dlBtnCompleted == completed && _dlBtnTotal == total) {
+        return;
+    }
+    _dlBtnState = state;
+    _dlBtnCompleted = completed;
+    _dlBtnTotal = total;
     [_downloadPlaylistBtn setTitle:title forState:UIControlStateNormal];
-    UIImage *bg = [ELTheme roundedRectImageWithSize:_downloadPlaylistBtn.frame.size
-                                              radius:18.0f
-                                           fillColor:fill
-                                         borderColor:nil];
+    UIImage *bg = [ELTheme stretchablePillImageWithHeight:_downloadPlaylistBtn.frame.size.height color:fill];
     [_downloadPlaylistBtn setBackgroundImage:bg forState:UIControlStateNormal];
 }
 
 - (void)onDownloadsChanged {
+    if (!self.view.window) {
+        _needsRefresh = YES;
+        return;
+    }
     [ELTrackListHelper refreshVisibleTrackCellsInTableView:_tableView forVideoId:nil];
     [self updateDownloadButtonState];
 }
 
 - (void)onDownloadProgress:(NSNotification *)note {
+    if (!self.view.window) {
+        _needsRefresh = YES;
+        return;
+    }
     NSString *vid = [[note userInfo] objectForKey:@"videoId"];
     [ELTrackListHelper refreshVisibleTrackCellsInTableView:_tableView forVideoId:vid];
 }
 
 - (void)onBatchProgress {
+    if (!self.view.window) {
+        _needsRefresh = YES;
+        return;
+    }
     [self updateDownloadButtonState];
 }
 #else
@@ -181,6 +217,21 @@
     [NSThread setThreadPriority:0.55];
 
     ELYouTubeClient *yt = [ELYouTubeClient sharedClient];
+    NSArray *defaultModes = [NSArray arrayWithObject:NSDefaultRunLoopMode];
+
+    /* 1. Load disk-cached playlist off main thread so push animation stays 60fps */
+    NSArray *cached = [yt cachedTracksForPlaylistId:_playlist.playlistId];
+    if ([cached count] > 0 && [self isLoadGenValid:gen]) {
+        NSDictionary *cacheMsg = [NSDictionary dictionaryWithObjectsAndKeys:
+                                  genNum, @"gen",
+                                  cached, @"tracks",
+                                  nil];
+        [self performSelectorOnMainThread:@selector(onPlaylistCachedLoaded:)
+                               withObject:cacheMsg
+                            waitUntilDone:NO
+                                    modes:defaultModes];
+    }
+
     NSString *err = nil;
     NSString *nextTok = nil;
     NSArray *firstPage = [yt fetchPlaylistPageForId:_playlist.playlistId
@@ -195,7 +246,10 @@
     if (!firstPage || [firstPage count] == 0) {
         NSMutableDictionary *res = [NSMutableDictionary dictionaryWithObject:genNum forKey:@"gen"];
         if (err) [res setObject:err forKey:@"error"];
-        [self performSelectorOnMainThread:@selector(onPlaylistLoadError:) withObject:res waitUntilDone:NO];
+        [self performSelectorOnMainThread:@selector(onPlaylistLoadError:)
+                               withObject:res
+                            waitUntilDone:NO
+                                    modes:defaultModes];
         [pool release];
         return;
     }
@@ -215,7 +269,10 @@
                         [[allTracks copy] autorelease], @"tracks",
                         [NSNumber numberWithBool:hasMore], @"hasMore",
                         nil];
-    [self performSelectorOnMainThread:@selector(onPlaylistFirstPageLoaded:) withObject:p1 waitUntilDone:NO];
+    [self performSelectorOnMainThread:@selector(onPlaylistFirstPageLoaded:)
+                           withObject:p1
+                        waitUntilDone:NO
+                                modes:defaultModes];
 
     if (!hasMore) {
         [yt saveCachedTracks:allTracks forPlaylistId:_playlist.playlistId];
@@ -277,7 +334,10 @@
                                  [[allTracks copy] autorelease], @"allTracks",
                                  [NSNumber numberWithBool:moreAfter], @"hasMore",
                                  nil];
-        [self performSelectorOnMainThread:@selector(onPlaylistMoreTracksLoaded:) withObject:moreMsg waitUntilDone:NO];
+        [self performSelectorOnMainThread:@selector(onPlaylistMoreTracksLoaded:)
+                               withObject:moreMsg
+                            waitUntilDone:NO
+                                    modes:defaultModes];
 
         if (!moreAfter) {
             [inner release];
@@ -299,7 +359,10 @@
                                 [[allTracks copy] autorelease], @"allTracks",
                                 [NSNumber numberWithBool:!fetchAbortedOnError], @"completed",
                                 nil];
-        [self performSelectorOnMainThread:@selector(onPlaylistFinishLoading:) withObject:finMsg waitUntilDone:NO];
+        [self performSelectorOnMainThread:@selector(onPlaylistFinishLoading:)
+                               withObject:finMsg
+                            waitUntilDone:NO
+                                    modes:defaultModes];
     }
     [pool release];
 }
@@ -385,6 +448,18 @@
     return [self tracks:_tracks matchPrefixOf:incoming count:curCount];
 }
 
+- (void)onPlaylistCachedLoaded:(NSDictionary *)res {
+    NSInteger gen = [[res objectForKey:@"gen"] integerValue];
+    if (![self isLoadGenValid:gen] || [_tracks count] > 0) return;
+    NSArray *cached = [res objectForKey:@"tracks"];
+    if ([cached count] == 0) return;
+    [_spinner stopAnimating];
+    [_tracks addObjectsFromArray:cached];
+    _isLoadingMore = YES;
+    _tableView.tableHeaderView = [self buildPlaylistHeader];
+    [_tableView reloadData];
+}
+
 - (void)onPlaylistFirstPageLoaded:(NSDictionary *)res {
     NSInteger gen = [[res objectForKey:@"gen"] integerValue];
     if (![self isLoadGenValid:gen]) return;
@@ -439,22 +514,31 @@
         return;
     }
 
-    /* Progressive append: preserve existing ELTrack objects in _tracks and append only new suffix */
+    /* Progressive append: insert only new rows without full tableView reloadData */
     if ([self currentTracksArePrefixOf:allTracks]) {
         NSUInteger oldCount = [_tracks count];
         NSUInteger totalCount = [allTracks count];
+        NSArray *toAppend = nil;
         if (oldCount + [newTracks count] == totalCount) {
-            [_tracks addObjectsFromArray:newTracks];
+            toAppend = newTracks;
         } else if (totalCount > oldCount) {
-            [_tracks addObjectsFromArray:[allTracks subarrayWithRange:NSMakeRange(oldCount, totalCount - oldCount)]];
+            toAppend = [allTracks subarrayWithRange:NSMakeRange(oldCount, totalCount - oldCount)];
+        }
+        if ([toAppend count] > 0) {
+            [_tracks addObjectsFromArray:toAppend];
+            NSMutableArray *paths = [NSMutableArray arrayWithCapacity:[toAppend count]];
+            for (NSUInteger i = oldCount; i < [_tracks count]; i++) {
+                [paths addObject:[NSIndexPath indexPathForRow:(NSInteger)i inSection:0]];
+            }
+            [_tableView insertRowsAtIndexPaths:paths withRowAnimation:UITableViewRowAnimationNone];
         }
     } else {
         [_tracks removeAllObjects];
         [_tracks addObjectsFromArray:allTracks];
+        [_tableView reloadData];
     }
     [self updateHeaderInfoLabel];
     [self updateDownloadButtonState];
-    [_tableView reloadData];
 }
 
 - (void)onPlaylistFinishLoading:(NSDictionary *)res {

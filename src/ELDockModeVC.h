@@ -5,7 +5,7 @@
 #if EL_FEATURE_DOCK_MODE
 
 @interface ELDockModeVC : UIViewController {
-    CAGradientLayer *_backdropGradient;
+    UIImageView *_backdropView;
     UILabel *_clockLabel;
     UIButton *_dimBtn;
     UIImageView *_artView;
@@ -19,9 +19,11 @@
     NSArray *_cachedLyrics;
     NSString *_lyricsVideoId;
     NSInteger _activeLyricIndex;
+    NSInteger _lyricsLoadGen;
 #endif
     UIButton *_prevBtn;
     UIButton *_playPauseBtn;
+    NSInteger _lastPlayIconState;
     UIButton *_nextBtn;
     UIActivityIndicatorView *_spinner;
     UIView *_dimOverlay;
